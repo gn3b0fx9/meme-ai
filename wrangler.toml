@@ -1,0 +1,11 @@
+name = "memeai"
+main = "index.js"
+compatibility_date = "2026-09-25"
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "memeai-db"
+database_id = "be62ae92-1896-4716-ae97-a0d1ffd2ad03"
