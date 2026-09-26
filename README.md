@@ -1,4 +1,4 @@
-1# Meme AI
+# Meme AI
 
 Solana meme coin scanner and supervised forecasting dashboard running on Cloudflare Workers and D1.
 
