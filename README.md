@@ -22,3 +22,9 @@ Forecast training and outcome capture live in `forecast.js`. Each token contribu
 The first forecasts are not available immediately after deployment. Outcomes are collected from later scanner observations, so the 1-hour, 24-hour, and 7-day models mature on different schedules. Tokens that disappear from discovery may not receive a future price observation and therefore will not count as completed training examples.
 
 Forecasts and signals are statistical estimates from historical scanner observations. They do not guarantee returns or execute trades.
+
+## Solana token risk checks
+
+Token cards can request an on-demand risk summary from RugCheck. The card shows the provider's reported risks, mint/freeze-authority warnings, token program/type, and reported locked-liquidity percentage. Successful reports are cached in the Worker isolate for up to 10 minutes.
+
+This third-party summary does not simulate a sell transaction. A missing warning is not proof that an authority is disabled, unavailable liquidity data is not a safety result, and no report can guarantee that a token is safe from a rug pull.

@@ -2,6 +2,7 @@ import { attachForecasts, saveForecastSamples } from "./forecast.js";
 import { page } from "./ui.js";
 
 const DEX = "https://api.dexscreener.com";
+const securityReports = new Map();
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -106,6 +107,7 @@ function scorePair(pair, discovery = {}) {
   return {
     address: pair?.baseToken?.address || "", symbol: pair?.baseToken?.symbol || "TOKEN",
     name: pair?.baseToken?.name || "Unknown", url: pair?.url || "", dex: pair?.dexId || "—",
+    imageUrl: /^https:\/\/cdn\.dexscreener\.com\//i.test(String(pair?.info?.imageUrl || "")) ? pair.info.imageUrl : "",
     priceUsd: num(pair?.priceUsd), marketCap: num(pair?.marketCap || pair?.fdv), liquidity: liq,
     volume5m: vol5m, volume1h: vol1h, tx5m: tx5, buys, sells, buySell: ratio,
     change5m: change5, change1h, acceleration, ageMin, opportunity, risk, adjustedScore,
@@ -138,6 +140,54 @@ async function fetchJsonWithRetry(url, label, options = {}) {
     if (i < attempts - 1) await new Promise(resolve => setTimeout(resolve, 500 * Math.pow(2, i)));
   }
   throw lastError || new Error(label + ": request failed");
+}
+
+async function fetchSecurityReport(address) {
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address)) {
+    throw new Error("Endereço Solana inválido");
+  }
+
+  const cached = securityReports.get(address);
+  if (cached && Date.now() - cached.at < 10 * 60 * 1000) return cached.data;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const response = await fetch(
+      "https://api.rugcheck.xyz/v1/tokens/" + encodeURIComponent(address) + "/report/summary",
+      { headers: { accept: "application/json" }, signal: controller.signal }
+    );
+    if (!response.ok) throw new Error("Serviço de análise indisponível (HTTP " + response.status + ")");
+    const report = await response.json();
+    if (report?.error) throw new Error(String(report.error).slice(0, 180));
+
+    const risks = Array.isArray(report?.risks) ? report.risks.slice(0, 20).map(item => ({
+      name: String(item?.name || "Risco reportado").slice(0, 100),
+      level: String(item?.level || "unknown").slice(0, 30),
+      description: String(item?.description || "").slice(0, 300),
+      value: String(item?.value || "").slice(0, 100)
+    })) : [];
+    if (!Array.isArray(report?.risks) && report?.score_normalised == null && report?.lpLockedPct == null) {
+      throw new Error("O serviço devolveu um relatório incompleto");
+    }
+    const hasSignal = pattern => risks.some(item => pattern.test(item.name + " " + item.description));
+    const data = {
+      provider: "RugCheck",
+      checkedAt: new Date().toISOString(),
+      score: report?.score_normalised != null && Number.isFinite(Number(report.score_normalised)) ? Number(report.score_normalised) : null,
+      lpLockedPct: report?.lpLockedPct != null && Number.isFinite(Number(report.lpLockedPct)) ? Number(report.lpLockedPct) : null,
+      tokenProgram: String(report?.tokenProgram || "").slice(0, 100),
+      tokenType: String(report?.tokenType || "").slice(0, 100),
+      mintAuthorityAlert: hasSignal(/mint.{0,24}authorit|authorit.{0,24}mint/i),
+      freezeAuthorityAlert: hasSignal(/freeze.{0,24}authorit|authorit.{0,24}freeze/i),
+      risks
+    };
+    if (securityReports.size >= 500) securityReports.clear();
+    securityReports.set(address, { at: Date.now(), data });
+    return data;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function optionalDiscovery(path, label) {
@@ -245,6 +295,29 @@ async function scan(env) {
   return { tokens, discovered: addresses.length, sourceStatus, batchesOk, batchesFailed };
 }
 
+async function attachInitialMarketCaps(db, tokens) {
+  const addresses = [...new Set(tokens.map(token => token?.address).filter(Boolean))];
+  if (!addresses.length) return;
+  const placeholders = addresses.map(() => "?").join(",");
+  const result = await db.prepare(`
+    SELECT address, mcap FROM (
+      SELECT address, mcap,
+        ROW_NUMBER() OVER (PARTITION BY address ORDER BY CASE WHEN mcap > 0 THEN 0 ELSE 1 END, seen_at ASC) AS row_num
+      FROM observations WHERE address IN (${placeholders})
+    ) WHERE row_num = 1
+  `).bind(...addresses).all();
+  const firstSeen = new Map((result.results || []).map(row => [row.address, row.mcap == null ? null : num(row.mcap)]));
+  const tracked = await db.prepare(`
+    SELECT address, initial_mcap FROM tracked_tokens WHERE address IN (${placeholders})
+  `).bind(...addresses).all();
+  for (const row of tracked.results || []) {
+    if (row.initial_mcap != null) firstSeen.set(row.address, num(row.initial_mcap));
+  }
+  for (const token of tokens) {
+    token.initialMarketCap = firstSeen.has(token.address) ? firstSeen.get(token.address) : null;
+  }
+}
+
 /* =========================================================
    D1 DATABASE + SAFE MIGRATION
 ========================================================= */
@@ -274,7 +347,8 @@ async function ensureSchema(db) {
       max_drawdown_pct REAL DEFAULT 0,
       discovery_sources TEXT,
       boost_total REAL DEFAULT 0,
-      community_takeover INTEGER DEFAULT 0
+      community_takeover INTEGER DEFAULT 0,
+      image_url TEXT
     )
   `).run();
 
@@ -291,7 +365,8 @@ async function ensureSchema(db) {
     ["max_drawdown_pct", "REAL DEFAULT 0"],
     ["discovery_sources", "TEXT"],
     ["boost_total", "REAL DEFAULT 0"],
-    ["community_takeover", "INTEGER DEFAULT 0"]
+    ["community_takeover", "INTEGER DEFAULT 0"],
+    ["image_url", "TEXT"]
   ];
 
   for (const [name, definition] of migrations) {
@@ -389,9 +464,9 @@ async function persistScan(db, tokens) {
           current_price, current_mcap, current_opportunity, current_risk,
           peak_pct, result, last_seen,
           hit10_at, hit25_at, stop20_at,
-          max_price, max_drawdown_pct, discovery_sources, boost_total, community_takeover
+          max_price, max_drawdown_pct, discovery_sources, boost_total, community_takeover, image_url
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).bind(
         x.address,
         x.symbol,
@@ -415,7 +490,8 @@ async function persistScan(db, tokens) {
         0,
         JSON.stringify(x.discoverySources || []),
         num(x.boostTotal),
-        x.communityTakeover ? 1 : 0
+        x.communityTakeover ? 1 : 0,
+        x.imageUrl || null
       ).run();
     } else if (old) {
       const initialPrice = num(old.initial_price);
@@ -481,7 +557,8 @@ async function persistScan(db, tokens) {
           max_drawdown_pct = ?,
           discovery_sources = ?,
           boost_total = ?,
-          community_takeover = ?
+          community_takeover = ?,
+          image_url = ?
         WHERE address = ?
       `).bind(
         x.symbol,
@@ -501,6 +578,7 @@ async function persistScan(db, tokens) {
         JSON.stringify(x.discoverySources || []),
         num(x.boostTotal),
         x.communityTakeover ? 1 : 0,
+        x.imageUrl || old.image_url || null,
         x.address
       ).run();
     }
@@ -587,6 +665,7 @@ async function analytics(db) {
       address,
       symbol,
       name,
+      image_url,
       initial_opportunity,
       initial_risk,
       result,
@@ -678,6 +757,7 @@ async function analytics(db) {
         address: row.address,
         symbol: row.symbol,
         name: row.name,
+        imageUrl: row.image_url,
         score,
         risk: num(row.initial_risk),
         initialPrice: num(row.initial_price),
@@ -856,6 +936,7 @@ async function handleRequest(request, env, ctx) {
       // never hold the iPhone request open until the browser timeout.
       const result = await scan(env);
       await ensureSchema(env.DB);
+      await attachInitialMarketCaps(env.DB, result.tokens || []);
       await attachForecasts(env.DB, result.tokens || []);
       const response = formatScanResult(result, Date.now());
       ctx.waitUntil(
@@ -869,6 +950,17 @@ async function handleRequest(request, env, ctx) {
       return json({
         error: err?.message || "scan failed"
       }, 500);
+    }
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/security") {
+    const address = url.searchParams.get("address") || "";
+    try {
+      return json(await fetchSecurityReport(address));
+    } catch (err) {
+      console.error("security report error", err);
+      const status = /inválido/.test(err?.message || "") ? 400 : 502;
+      return json({ error: err?.message || "Não foi possível obter a análise de risco" }, status);
     }
   }
 
@@ -907,4 +999,4 @@ export default {
   }
 };
 
-// V2.7 supervised forecasting release
+// V2.8 token risk reports and clearer scanner cards
