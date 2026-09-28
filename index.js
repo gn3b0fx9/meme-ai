@@ -298,20 +298,30 @@ async function scan(env) {
 async function attachInitialMarketCaps(db, tokens) {
   const addresses = [...new Set(tokens.map(token => token?.address).filter(Boolean))];
   if (!addresses.length) return;
-  const placeholders = addresses.map(() => "?").join(",");
-  const result = await db.prepare(`
-    SELECT address, mcap FROM (
-      SELECT address, mcap,
-        ROW_NUMBER() OVER (PARTITION BY address ORDER BY CASE WHEN mcap > 0 THEN 0 ELSE 1 END, seen_at ASC) AS row_num
-      FROM observations WHERE address IN (${placeholders})
-    ) WHERE row_num = 1
-  `).bind(...addresses).all();
-  const firstSeen = new Map((result.results || []).map(row => [row.address, row.mcap == null ? null : num(row.mcap)]));
-  const tracked = await db.prepare(`
-    SELECT address, initial_mcap FROM tracked_tokens WHERE address IN (${placeholders})
-  `).bind(...addresses).all();
-  for (const row of tracked.results || []) {
-    if (row.initial_mcap != null) firstSeen.set(row.address, num(row.initial_mcap));
+  const firstSeen = new Map();
+
+  // D1 limits the number of bound SQL variables. A busy scan can return more
+  // token addresses than fit in one IN (...) query, so load them in groups.
+  for (let start = 0; start < addresses.length; start += 80) {
+    const group = addresses.slice(start, start + 80);
+    const placeholders = group.map(() => "?").join(",");
+    const result = await db.prepare(`
+      SELECT address, mcap FROM (
+        SELECT address, mcap,
+          ROW_NUMBER() OVER (PARTITION BY address ORDER BY CASE WHEN mcap > 0 THEN 0 ELSE 1 END, seen_at ASC) AS row_num
+        FROM observations WHERE address IN (${placeholders})
+      ) WHERE row_num = 1
+    `).bind(...group).all();
+    for (const row of result.results || []) {
+      firstSeen.set(row.address, row.mcap == null ? null : num(row.mcap));
+    }
+
+    const tracked = await db.prepare(`
+      SELECT address, initial_mcap FROM tracked_tokens WHERE address IN (${placeholders})
+    `).bind(...group).all();
+    for (const row of tracked.results || []) {
+      if (row.initial_mcap != null) firstSeen.set(row.address, num(row.initial_mcap));
+    }
   }
   for (const token of tokens) {
     token.initialMarketCap = firstSeen.has(token.address) ? firstSeen.get(token.address) : null;
