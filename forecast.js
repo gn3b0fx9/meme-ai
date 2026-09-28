@@ -1,9 +1,9 @@
 /* Supervised forecasts learn from observed outcomes; no forecast is presented
    until there are enough completed examples for that horizon. */
 const FORECAST_HORIZONS = [
-  { key: "short", label: "1h", ms: 3600000, tolerance: 900000 },
-  { key: "medium", label: "24h", ms: 86400000, tolerance: 21600000 },
-  { key: "long", label: "7d", ms: 604800000, tolerance: 151200000 }
+  { key: "short", label: "1h", ms: 3600000, earlyMs: 20 * 60000, tolerance: 2 * 3600000, expireGrace: 6 * 3600000 },
+  { key: "medium", label: "24h", ms: 86400000, earlyMs: 2 * 3600000, tolerance: 12 * 3600000, expireGrace: 36 * 3600000 },
+  { key: "long", label: "7d", ms: 604800000, earlyMs: 12 * 3600000, tolerance: 2 * 86400000, expireGrace: 3 * 86400000 }
 ];
 let predictionModelCache = { trainedAt: 0, models: null };
 const num = (v, fallback = 0) => {
@@ -13,11 +13,12 @@ const num = (v, fallback = 0) => {
 
 function modelFeatures(x) {
   const c = (v, lo, hi) => Math.max(lo, Math.min(hi, num(v)));
+  const age = x?.ageMin == null || !Number.isFinite(Number(x.ageMin)) ? 1440 : num(x.ageMin);
   return [1, c(x?.adjustedScore, 0, 100) / 100, c(x?.risk, 0, 100) / 100,
     c(x?.change5m, -50, 50) / 50, c(x?.change1h, -100, 100) / 100,
     c(Math.log10(Math.max(1, num(x?.liquidity))), 0, 8) / 8,
     c(Math.log10(Math.max(1, num(x?.volume1h))), 0, 9) / 9,
-    c(x?.buySell, 0, 5) / 5, c(x?.ageMin, 0, 10080) / 10080,
+    c(x?.buySell, 0, 5) / 5, c(age, 0, 10080) / 10080,
     c(x?.acceleration, 0, 20) / 20];
 }
 
@@ -60,6 +61,87 @@ function trainHorizon(rows) {
     validationSamples: xs.length - trainCount, validationBalancedAccuracy: (sensitivity + specificity) / 2 * 100 };
 }
 
+function pickObservation(list, entryAt, due, windowStart, windowEnd) {
+  let best = null, bestDist = Infinity;
+  let lastAfterEntry = null;
+  for (const obs of list) {
+    const t = num(obs.seen_at);
+    const price = num(obs.price);
+    if (t < entryAt || price <= 0) continue;
+    lastAfterEntry = obs;
+    if (t < windowStart || t > windowEnd) continue;
+    const dist = Math.abs(t - due);
+    if (dist < bestDist) {
+      best = obs;
+      bestDist = dist;
+    }
+  }
+  return { inWindow: best, lastAfterEntry };
+}
+
+async function resolvePendingForecasts(db, now) {
+  const pending = await db.prepare(`
+    SELECT id, address, entry_at,
+      short_due, medium_due, long_due,
+      short_status, medium_status, long_status
+    FROM prediction_samples
+    WHERE (short_status = 'pending' AND short_due <= ?)
+       OR (medium_status = 'pending' AND medium_due <= ?)
+       OR (long_status = 'pending' AND long_due <= ?)
+    ORDER BY entry_at ASC
+    LIMIT 200
+  `).bind(now, now, now).all();
+  const rows = pending.results || [];
+  if (!rows.length) return;
+
+  const addresses = [...new Set(rows.map(row => row.address).filter(Boolean))];
+  const minEntry = Math.min(...rows.map(row => num(row.entry_at)));
+  const obsByAddress = new Map();
+
+  for (let i = 0; i < addresses.length; i += 40) {
+    const group = addresses.slice(i, i + 40);
+    const placeholders = group.map(() => "?").join(",");
+    const result = await db.prepare(`
+      SELECT address, seen_at, price
+      FROM observations
+      WHERE address IN (${placeholders}) AND seen_at >= ? AND price > 0
+      ORDER BY seen_at ASC
+    `).bind(...group, minEntry).all();
+    for (const obs of result.results || []) {
+      const list = obsByAddress.get(obs.address) || [];
+      list.push(obs);
+      obsByAddress.set(obs.address, list);
+    }
+  }
+
+  for (const row of rows) {
+    const list = obsByAddress.get(row.address) || [];
+    const sets = [];
+    const values = [];
+    for (const h of FORECAST_HORIZONS) {
+      if (row[`${h.key}_status`] !== "pending") continue;
+      const due = num(row[`${h.key}_due`]);
+      if (now < due) continue;
+      const picked = pickObservation(list, num(row.entry_at), due, due - h.earlyMs, due + h.tolerance);
+      let exitPrice = num(picked.inWindow?.price);
+      if (exitPrice <= 0) {
+        if (now < due + h.expireGrace) continue;
+        exitPrice = num(picked.lastAfterEntry?.price);
+        if (exitPrice <= 0) {
+          sets.push(`${h.key}_status = 'expired'`);
+          continue;
+        }
+      }
+      sets.push(`${h.key}_exit = ?`);
+      sets.push(`${h.key}_status = 'complete'`);
+      values.push(exitPrice);
+    }
+    if (!sets.length) continue;
+    await db.prepare(`UPDATE prediction_samples SET ${sets.join(", ")} WHERE id = ?`)
+      .bind(...values, row.id).run();
+  }
+}
+
 export async function attachForecasts(db, tokens) {
   const now = Date.now();
   if (!predictionModelCache.models || now - predictionModelCache.trainedAt > 300000) {
@@ -85,16 +167,17 @@ export async function attachForecasts(db, tokens) {
   }
   for (const token of tokens) {
     const f = modelFeatures(token);
+    const applicable = num(token?.adjustedScore) >= 45;
     token.forecasts = {};
     for (const h of FORECAST_HORIZONS) {
       const model = predictionModelCache.models[h.key];
       if (!model?.trained) {
-        token.forecasts[h.key] = { horizon: h.label, ready: false, samples: model?.samples || 0, minimumSamples: 100 };
+        token.forecasts[h.key] = { horizon: h.label, ready: false, applicable, samples: model?.samples || 0, minimumSamples: 100 };
         continue;
       }
       const dot = weights => weights.reduce((sum, w, i) => sum + w * f[i], 0);
       const z = Math.max(-20, Math.min(20, dot(model.logistic)));
-      token.forecasts[h.key] = { horizon: h.label, ready: true, samples: model.samples,
+      token.forecasts[h.key] = { horizon: h.label, ready: true, applicable, samples: model.samples,
         validated: model.validationSamples >= 20 && model.validationBalancedAccuracy >= 60,
         validationBalancedAccuracy: Math.round(model.validationBalancedAccuracy),
         validationSamples: model.validationSamples,
@@ -107,23 +190,26 @@ export async function attachForecasts(db, tokens) {
 export async function saveForecastSamples(db, tokens, now) {
   const day = new Date(now).toISOString().slice(0, 10);
   for (const x of tokens) {
-    if (!x?.address) continue;
+    if (!x?.address || num(x.priceUsd) <= 0) continue;
+    const price = num(x.priceUsd);
     const sets = [], values = [];
     for (const h of FORECAST_HORIZONS) {
       const k = h.key;
-      sets.push(`${k}_exit=CASE WHEN ${k}_status='pending' AND ${k}_due<=? AND ?<=${k}_due+? THEN ? ELSE ${k}_exit END`);
-      sets.push(`${k}_status=CASE WHEN ${k}_status='pending' AND ${k}_due<=? AND ?<=${k}_due+? THEN 'complete' WHEN ${k}_status='pending' AND ?>${k}_due+? THEN 'expired' ELSE ${k}_status END`);
-      values.push(now, now, h.tolerance, num(x.priceUsd), now, now, h.tolerance, now, h.tolerance);
+      sets.push(`${k}_exit=CASE WHEN ${k}_status='pending' AND ? >= ${k}_due - ${h.earlyMs} AND ? <= ${k}_due + ${h.tolerance} AND ? > 0 THEN ? ELSE ${k}_exit END`);
+      sets.push(`${k}_status=CASE WHEN ${k}_status='pending' AND ? >= ${k}_due - ${h.earlyMs} AND ? <= ${k}_due + ${h.tolerance} AND ? > 0 THEN 'complete' ELSE ${k}_status END`);
+      values.push(now, now, price, price, now, now, price);
     }
     await db.prepare(`UPDATE prediction_samples SET ${sets.join(", ")} WHERE address=?`).bind(...values, x.address).run();
-    if (num(x.adjustedScore) < 45 || num(x.priceUsd) <= 0) continue;
+    if (num(x.adjustedScore) < 45) continue;
     await db.prepare(`INSERT OR IGNORE INTO prediction_samples (
       address,day_key,entry_at,entry_price,entry_score,entry_risk,change5m,change1h,
       liquidity,volume1h,buy_sell,age_min,acceleration,short_due,medium_due,long_due
     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
-      x.address, day, now, num(x.priceUsd), num(x.adjustedScore), num(x.risk), num(x.change5m),
-      num(x.change1h), num(x.liquidity), num(x.volume1h), num(x.buySell), num(x.ageMin),
+      x.address, day, now, price, num(x.adjustedScore), num(x.risk), num(x.change5m),
+      num(x.change1h), num(x.liquidity), num(x.volume1h), num(x.buySell),
+      x.ageMin == null ? null : num(x.ageMin),
       num(x.acceleration), now + 3600000, now + 86400000, now + 604800000
     ).run();
   }
+  await resolvePendingForecasts(db, now);
 }

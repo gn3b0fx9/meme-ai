@@ -3,6 +3,67 @@ import { page } from "./ui.js";
 
 const DEX = "https://api.dexscreener.com";
 const securityReports = new Map();
+let schemaReady = false;
+let persistQueue = Promise.resolve();
+
+function enqueuePersist(db, tokens) {
+  const next = persistQueue.then(() => persistScan(db, tokens));
+  persistQueue = next.catch(err => {
+    console.error("persist queue", err);
+  });
+  return next;
+}
+
+function hasValidPrice(x) {
+  return num(x?.priceUsd) > 0;
+}
+
+function shouldTrack(x) {
+  if (!x?.address || !hasValidPrice(x)) return false;
+  if (x.alert) return true;
+  return num(x.adjustedScore) >= 55 && num(x.risk) <= 55 && num(x.liquidity) >= 10000;
+}
+
+function trackingResult(hit10At, hit25At, stop20At) {
+  const hit = hit25At ? "hit25" : hit10At ? "hit10" : null;
+  const stop = stop20At ? "stop20" : null;
+  if (hit && stop) return hit + "_" + stop;
+  return hit || stop || "tracking";
+}
+
+function resultFlags(result) {
+  const value = String(result || "");
+  return {
+    hit25: value.includes("hit25"),
+    hit10: value.includes("hit10") || value.includes("hit25"),
+    stop20: value.includes("stop20")
+  };
+}
+
+async function allSettledPool(items, concurrency, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      try {
+        results[i] = { status: "fulfilled", value: await fn(items[i], i) };
+      } catch (reason) {
+        results[i] = { status: "rejected", reason };
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, items.length || 1)) }, worker));
+  return results;
+}
+
+function rotateSlice(list, size, periodMs = 300000) {
+  if (list.length <= size) return list;
+  const start = (Math.floor(Date.now() / periodMs) * size) % list.length;
+  const out = [];
+  for (let i = 0; i < size; i++) out.push(list[(start + i) % list.length]);
+  return out;
+}
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -77,8 +138,8 @@ function scorePair(pair, discovery = {}) {
   const change5 = num(pair?.priceChange?.m5);
   const change1h = num(pair?.priceChange?.h1);
   const created = num(pair?.pairCreatedAt);
-  const ageMin = created ? Math.max(0, (Date.now() - created) / 60000) : 99999;
-  const ratio = sells > 0 ? buys / sells : buys > 0 ? 9.99 : 0;
+  const ageMin = created ? Math.max(0, (Date.now() - created) / 60000) : null;
+  const ratio = sells > 0 ? buys / sells : 0;
   const expected5m = vol1h > 0 ? vol1h / 12 : 0;
   const acceleration = expected5m > 0 ? vol5m / expected5m : 0;
 
@@ -87,8 +148,11 @@ function scorePair(pair, discovery = {}) {
   const momentum = Math.max(0, Math.min(25, 12.5 + change5 * 0.75));
   const liquidity = Math.max(0, Math.min(20, Math.log10(Math.max(liq, 100)) * 4.2 - 7));
   const activity = Math.max(0, Math.min(20, Math.log10(Math.max(tx5, 1)) * 8 - 2));
-  const flow = Math.max(0, Math.min(20, ratio >= 1 ? 10 + Math.min(10, (ratio - 1) * 6) : ratio * 10));
-  const freshness = ageMin <= 5 ? 15 : ageMin <= 15 ? 13 : ageMin <= 30 ? 11 : ageMin <= 60 ? 8 : ageMin <= 180 ? 5 : 2;
+  const flow = sells === 0 && buys > 0
+    ? 8
+    : Math.max(0, Math.min(20, ratio >= 1 ? 10 + Math.min(10, (ratio - 1) * 6) : ratio * 10));
+  const freshness = ageMin == null ? 6
+    : ageMin <= 5 ? 15 : ageMin <= 15 ? 13 : ageMin <= 30 ? 11 : ageMin <= 60 ? 8 : ageMin <= 180 ? 5 : 2;
   const opportunity = Math.max(0, Math.min(100, Math.round(momentum + liquidity + activity + flow + freshness)));
 
   let risk = 10;
@@ -98,8 +162,9 @@ function scorePair(pair, discovery = {}) {
   if (liq > 0 && vol1h / liq > 15) { risk += 18; flags.push("volume/liquidez extremo"); }
   if (Math.abs(change5) > 80) { risk += 18; flags.push("movimento 5m extremo"); }
   if (tx5 < 40) { risk += 12; flags.push("atividade baixa"); }
-  if (ratio < 0.7) { risk += 15; flags.push("mais vendas"); }
-  if (ageMin < 15 && liq < 25000) { risk += 12; flags.push("muito novo + pouca liquidez"); }
+  if (sells === 0 && buys > 0) { risk += 8; flags.push("compras sem vendas"); }
+  else if (ratio < 0.7) { risk += 15; flags.push("mais vendas"); }
+  if (ageMin != null && ageMin < 15 && liq < 25000) { risk += 12; flags.push("muito novo + pouca liquidez"); }
   if (acceleration > 8 && liq < 15000) { risk += 8; flags.push("aceleração com pouca liquidez"); }
   risk = Math.max(0, Math.min(100, Math.round(risk)));
   const adjustedScore = Math.max(0, Math.min(100, Math.round(opportunity - risk * 0.45)));
@@ -148,7 +213,11 @@ async function fetchSecurityReport(address) {
   }
 
   const cached = securityReports.get(address);
-  if (cached && Date.now() - cached.at < 10 * 60 * 1000) return cached.data;
+  if (cached && Date.now() - cached.at < 10 * 60 * 1000) {
+    securityReports.delete(address);
+    securityReports.set(address, cached);
+    return cached.data;
+  }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 8000);
@@ -182,7 +251,11 @@ async function fetchSecurityReport(address) {
       freezeAuthorityAlert: hasSignal(/freeze.{0,24}authorit|authorit.{0,24}freeze/i),
       risks
     };
-    if (securityReports.size >= 500) securityReports.clear();
+    while (securityReports.size >= 500) {
+      const oldest = securityReports.keys().next().value;
+      if (oldest == null) break;
+      securityReports.delete(oldest);
+    }
     securityReports.set(address, { at: Date.now(), data });
     return data;
   } finally {
@@ -248,7 +321,7 @@ async function scan(env) {
     const r = await env.DB.prepare("SELECT address FROM tracked_tokens ORDER BY last_seen DESC LIMIT 500").all();
     for (const row of (r.results || [])) {
       if (!row.address) continue;
-      const current = discovery.get(row.address) || { sources: [], boostAmount: 0, boostTotal: 0, communityTakeover: false };
+      const current = discovery.get(row.address) || { sources: [], boostAmount: 0, boostTotal: 0, communityTakeover: false, links: [] };
       if (!current.sources.includes("tracked")) current.sources.push("tracked");
       discovery.set(row.address, current);
     }
@@ -258,28 +331,23 @@ async function scan(env) {
     sourceStatus.tracked = "error";
     sourceStatus.trackedError = err?.message || String(err);
   }
-  // Fast-scan policy: tracked tokens are always first, then only a controlled
-  // number of newly discovered candidates. This keeps the mobile scan fast
-  // while still allowing discovery to refresh continuously across scans.
-  const addresses = [...discovery.keys()].sort((a,b) => {
-    const at = discovery.get(a)?.sources?.includes("tracked") ? 0 : 1;
-    const bt = discovery.get(b)?.sources?.includes("tracked") ? 0 : 1;
-    return at - bt;
-  }).slice(0, 180);
+  const trackedAddresses = [...discovery.entries()]
+    .filter(([, info]) => info?.sources?.includes("tracked"))
+    .map(([address]) => address);
+  const freshAddresses = [...discovery.keys()].filter(address => !trackedAddresses.includes(address));
+  const addresses = [...trackedAddresses, ...rotateSlice(freshAddresses, 60)];
   if (!addresses.length) return { tokens: [], discovered: 0, sourceStatus, batchesOk: 0, batchesFailed: 0 };
 
   const best = new Map(), batches = chunks(addresses, 30);
   let batchesOk = 0, batchesFailed = 0;
   const batchErrors = [];
 
-  // Run all small batches concurrently. DEX Screener's token endpoint accepts
-  // up to 30 addresses per request, so 180 addresses means at most 6 requests.
-  // Keeping the total bounded avoids a long serial waterfall on mobile.
-  const results = await Promise.allSettled(batches.map(batch => fetchJsonWithRetry(
+  // Tracked tokens are always included. New discoveries rotate 60 per scan.
+  const results = await allSettledPool(batches, 6, batch => fetchJsonWithRetry(
     DEX + "/tokens/v1/solana/" + batch.join(","),
     "DEX Screener token batch",
-    { attempts: 1, timeoutMs: 2500 }
-  )));
+    { attempts: 1, timeoutMs: 4000 }
+  ));
   for (const result of results) {
     if (result.status === "rejected") { batchesFailed++; batchErrors.push(result.reason?.message || String(result.reason)); continue; }
     batchesOk++;
@@ -324,7 +392,13 @@ async function attachInitialMarketCaps(db, tokens) {
     }
   }
   for (const token of tokens) {
-    token.initialMarketCap = firstSeen.has(token.address) ? firstSeen.get(token.address) : null;
+    if (firstSeen.has(token.address)) {
+      token.initialMarketCap = firstSeen.get(token.address);
+    } else if (num(token.marketCap) > 0) {
+      token.initialMarketCap = num(token.marketCap);
+    } else {
+      token.initialMarketCap = null;
+    }
   }
 }
 
@@ -333,6 +407,7 @@ async function attachInitialMarketCaps(db, tokens) {
 ========================================================= */
 
 async function ensureSchema(db) {
+  if (schemaReady) return;
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS tracked_tokens (
       address TEXT PRIMARY KEY,
@@ -446,7 +521,7 @@ async function ensureSchema(db) {
   }
 
   await db.prepare(`CREATE INDEX IF NOT EXISTS idx_obs_seen_at ON observations(seen_at)`).run();
-
+  schemaReady = true;
 }
 
 /* =========================================================
@@ -461,12 +536,13 @@ async function persistScan(db, tokens) {
 
   for (const x of tokens) {
     if (!x?.address) continue;
+    const validPrice = hasValidPrice(x);
 
     const old = await db.prepare(
       "SELECT * FROM tracked_tokens WHERE address = ?"
     ).bind(x.address).first();
 
-    if (!old && x.alert) {
+    if (!old && shouldTrack(x) && validPrice) {
       await db.prepare(`
         INSERT INTO tracked_tokens (
           address, symbol, name, first_seen,
@@ -503,7 +579,19 @@ async function persistScan(db, tokens) {
         x.communityTakeover ? 1 : 0,
         x.imageUrl || null
       ).run();
-    } else if (old) {
+    } else if (old && !validPrice) {
+      await db.prepare(`
+        UPDATE tracked_tokens
+        SET symbol = ?, name = ?, last_seen = ?, image_url = ?
+        WHERE address = ?
+      `).bind(
+        x.symbol || old.symbol,
+        x.name || old.name,
+        now,
+        x.imageUrl || old.image_url || null,
+        x.address
+      ).run();
+    } else if (old && validPrice) {
       const initialPrice = num(old.initial_price);
       const currentPrice = num(x.priceUsd);
 
@@ -538,15 +626,7 @@ async function persistScan(db, tokens) {
       if (!hit25At && pct >= 25) hit25At = now;
       if (!stop20At && pct <= -20) stop20At = now;
 
-      let result = old.result || "tracking";
-
-      if (hit25At) {
-        result = "hit25";
-      } else if (hit10At) {
-        result = "hit10";
-      } else if (stop20At) {
-        result = "stop20";
-      }
+      const result = trackingResult(hit10At, hit25At, stop20At);
 
       await db.prepare(`
         UPDATE tracked_tokens
@@ -593,7 +673,7 @@ async function persistScan(db, tokens) {
       ).run();
     }
 
-    if (old || x.alert || num(x.adjustedScore) >= 45) {
+    if ((old || shouldTrack(x) || num(x.adjustedScore) >= 45) && validPrice) {
       await db.prepare(`
         INSERT INTO observations (
           address, seen_at, price, mcap, opportunity, risk, alert,
@@ -789,13 +869,10 @@ async function analytics(db) {
     peakSum += peak;
     drawdownSum += dd;
 
-    const legacyHit25 = row.result === "hit25";
-    const legacyHit10 = row.result === "hit10" || legacyHit25;
-    const legacyStop20 = row.result === "stop20";
-
-    const hasHit10 = Boolean(row.hit10_at) || legacyHit10;
-    const hasHit25 = Boolean(row.hit25_at) || legacyHit25;
-    const hasStop20 = Boolean(row.stop20_at) || legacyStop20;
+    const flags = resultFlags(row.result);
+    const hasHit10 = Boolean(row.hit10_at) || flags.hit10;
+    const hasHit25 = Boolean(row.hit25_at) || flags.hit25;
+    const hasStop20 = Boolean(row.stop20_at) || flags.stop20;
 
     if (hasHit10) {
       hit10++;
@@ -858,7 +935,7 @@ async function analytics(db) {
   const observationRow = await db.prepare("SELECT COUNT(*) AS count FROM observations").first();
 
   return {
-    version: "2.6.4",
+    version: "2.8.1",
     tracked: data.length,
     observations: num(observationRow?.count),
     hit10,
@@ -889,7 +966,7 @@ function formatScanResult(result, at) {
   const tokens = result.tokens || [];
   const aiAlerts = tokens.filter(x => Object.values(x.forecasts || {}).some(f => f?.ready && f.validated &&
     num(f.probabilityUp) >= 65 && num(f.expectedReturnPct) > 0 && num(x.risk) <= 55 &&
-    num(x.liquidity) >= 10000 && num(x.adjustedScore) >= 55)).length;
+    num(x.liquidity) >= 10000 && num(x.adjustedScore) >= 55 && f.applicable !== false)).length;
   const sourceCounts = {};
   for (const token of tokens) {
     for (const source of (token.discoverySources || [])) {
@@ -914,7 +991,7 @@ async function executeScan(env) {
   const result = await scan(env);
   const tokens = result.tokens || [];
   const at = Date.now();
-  await persistScan(env.DB, tokens);
+  await enqueuePersist(env.DB, tokens);
   return formatScanResult(result, at);
 }
 
@@ -946,15 +1023,14 @@ async function handleRequest(request, env, ctx) {
       // never hold the iPhone request open until the browser timeout.
       const result = await scan(env);
       await ensureSchema(env.DB);
-      await attachInitialMarketCaps(env.DB, result.tokens || []);
-      await attachForecasts(env.DB, result.tokens || []);
-      const response = formatScanResult(result, Date.now());
       ctx.waitUntil(
-        persistScan(env.DB, result.tokens || []).catch(err => {
+        enqueuePersist(env.DB, result.tokens || []).catch(err => {
           console.error("background persist error", err);
         })
       );
-      return json(response);
+      await attachInitialMarketCaps(env.DB, result.tokens || []);
+      await attachForecasts(env.DB, result.tokens || []);
+      return json(formatScanResult(result, Date.now()));
     } catch (err) {
       console.error("scan error", err);
       return json({
@@ -1009,4 +1085,4 @@ export default {
   }
 };
 
-// V2.8 token risk reports and clearer scanner cards
+// V2.8.1 persist reliability, tracked coverage, and forecast outcomes
