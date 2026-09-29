@@ -86,6 +86,45 @@ dialog.risk-dialog{width:min(460px,calc(100% - 28px));padding:0;border:1px solid
 .security-meta-item{padding:6px 8px;border-radius:7px;background:#101a27;border:1px solid #1c2b3e;font-size:10px}
 .security-meta-item span{color:#8ea1b8;display:block}
 .security-meta-item b{color:#edf2f8;font-size:11px;margin-top:2px;display:block}
+
+/* Alternador de Vista Cards vs Tabela */
+.view-toggle{display:inline-flex;align-items:center;background:#0e1724;border:1px solid #283a50;border-radius:11px;padding:3px;margin-left:auto}
+.view-toggle-btn{padding:7px 12px;border-radius:8px;font-size:11px;font-weight:800;color:#94a6bc;background:transparent;transition:all .15s}
+.view-toggle-btn:hover{color:#edf2f8}
+.view-toggle-btn.active{background:#1b2d42;color:#8ce6b0;box-shadow:0 2px 8px rgba(0,0,0,.25)}
+
+/* Barra de Pressão de Compras e Vendas */
+.pressure-box{margin-top:10px;padding:8px 10px;border-radius:10px;background:#0a121c;border:1px solid #1f2f42}
+.pressure-labels{display:flex;justify-content:space-between;align-items:center;font-size:9px;font-weight:850;margin-bottom:5px}
+.pressure-buy{color:#79dfa0}
+.pressure-sell{color:#ff8791}
+.pressure-ratio{color:#cbd7e6;background:#152233;padding:1px 6px;border-radius:5px;font-size:8px}
+.pressure-bar{height:5px;border-radius:999px;background:#2b191e;display:flex;overflow:hidden}
+.pressure-fill-buy{height:100%;background:linear-gradient(90deg,#43b975,#79dfa0);border-radius:999px 0 0 999px;transition:width .3s}
+.pressure-fill-sell{height:100%;background:linear-gradient(90deg,#ff6b78,#ff8791);border-radius:0 999px 999px 0;transition:width .3s}
+
+/* Abas dentro do Card */
+.card-tabs{display:flex;gap:4px;overflow-x:auto;margin-top:12px;padding-bottom:3px;-webkit-overflow-scrolling:touch}
+.card-tabs::-webkit-scrollbar{height:3px}
+.card-tabs::-webkit-scrollbar-thumb{background:#23354b;border-radius:999px}
+.card-tab{padding:6px 10px;border-radius:8px;background:#101a27;border:1px solid #233449;color:#95a6bb;font-size:10px;font-weight:800;white-space:nowrap;transition:all .15s}
+.card-tab:hover{background:#172538;color:#edf2f8}
+.card-tab.active{background:#182e22;border-color:#2a6543;color:#8de7b1}
+.card-panels{margin-top:6px}
+.card-panel{display:none}
+.card-panel.active{display:block;animation:enter .15s ease}
+
+/* Estilos da Vista em Tabela / Compacta */
+.table-container{overflow-x:auto;margin-top:10px;border:1px solid #25374d;border-radius:16px;background:#0d141f}
+.token-table{width:100%;border-collapse:collapse;text-align:left;font-size:11px}
+.token-table th{padding:12px 14px;background:#101a27;color:#91a3b8;font-weight:850;font-size:10px;letter-spacing:.03em;border-bottom:1px solid #25374d;white-space:nowrap}
+.token-table td{padding:11px 14px;border-bottom:1px solid #1a2738;color:#e7edf6;vertical-align:middle;white-space:nowrap}
+.token-table tr:hover td{background:#111b29}
+.table-token-info{display:flex;align-items:center;gap:10px}
+.table-token-symbol{font-weight:900;color:#f3f7fc;font-size:13px}
+.table-token-name{color:#8da0b6;font-size:10px}
+.table-action-btn{padding:6px 9px;border-radius:8px;background:#142921;border:1px solid #2c6344;color:#91ecb6;font-size:10px;font-weight:850;text-decoration:none}
+.table-action-btn:hover{background:#1c3d2f}
 </style>
 </head>
 <body>
@@ -121,6 +160,10 @@ dialog.risk-dialog{width:min(460px,calc(100% - 28px));padding:0;border:1px solid
   <div class="filters-row">
     <select id="filter" onchange="render()"><option value="all">Todos os tokens</option><option value="ai">Sinais IA validados</option><option value="top">Top oportunidades</option><option value="traction">Fase 2: Tração ($60k-$350k)</option><option value="runner">Fase 3: Runner (> $350k)</option><option value="solidliq">Liquidez sólida (≥ 12% MC)</option><option value="alerts">Alertas do score</option><option value="lowrisk">Risco ≤35</option><option value="young">Até 30 min</option></select>
     <select id="sort" onchange="render()"><option value="adjusted">Melhor score ajustado</option><option value="potential">Maior Upside Potencial</option><option value="liqratio">Melhor Rácio Liquidez/MC</option><option value="opp">Maior oportunidade</option><option value="risk">Menor risco</option><option value="age">Mais recentes</option><option value="volume">Maior volume 1h</option></select>
+    <div class="view-toggle">
+      <button type="button" class="view-toggle-btn active" id="btnViewCards" onclick="setViewMode('cards')">🎴 Cards</button>
+      <button type="button" class="view-toggle-btn" id="btnViewTable" onclick="setViewMode('table')">☰ Tabela</button>
+    </div>
   </div>
   <div id="scanError"></div>
   <div id="list" class="list"></div>
@@ -163,7 +206,11 @@ dialog.risk-dialog{width:min(460px,calc(100% - 28px));padding:0;border:1px solid
 </div></nav>
 
 <script>
-let tokens=[];let historyData=[];let analyticsData=null;let activeSection='scanSection';
+let tokens=[];let historyData=[];let analyticsData=null;let activeSection='scanSection';let currentViewMode='cards';
+function setViewMode(mode){currentViewMode=mode;const bc=document.getElementById('btnViewCards'),bt=document.getElementById('btnViewTable');if(bc)bc.classList.toggle('active',mode==='cards');if(bt)bt.classList.toggle('active',mode==='table');render()}
+function switchCardTab(btn,tabId){const card=btn.closest('.token');if(!card)return;card.querySelectorAll('.card-tab').forEach(b=>b.classList.remove('active'));btn.classList.add('active');card.querySelectorAll('.card-panel').forEach(p=>p.classList.remove('active'));const target=card.querySelector('.card-panel[data-tab="'+tabId+'"]');if(target)target.classList.add('active')}
+function buySellPressureHtml(x){const buys=num(x?.buys),sells=num(x?.sells),total=buys+sells;const buyPct=total>0?Math.round((buys/total)*100):50,sellPct=100-buyPct;const ratio=num(x?.buySell,1).toFixed(2);return '<div class="pressure-box"><div class="pressure-labels"><span class="pressure-buy">🟢 Compras <b>'+buyPct+'% ('+buys+')</b></span><span class="pressure-ratio">Rácio <b>'+ratio+'x</b></span><span class="pressure-sell">🔴 Vendas <b>'+sellPct+'% ('+sells+')</b></span></div><div class="pressure-bar"><div class="pressure-fill-buy" style="width:'+buyPct+'%"></div><div class="pressure-fill-sell" style="width:'+sellPct+'%"></div></div></div>'}
+function techMetricsHtml(x){const opp=num(x?.opportunity),risk=num(x?.risk),f=x?.factors||{},flags=Array.isArray(x?.riskFlags)?x.riskFlags:[];return '<div class="factor-grid"><div class="factor"><span>Impulso</span><b>'+num(f.momentum)+'/25</b></div><div class="factor"><span>Liquidez</span><b>'+num(f.liquidity)+'/20</b></div><div class="factor"><span>Atividade</span><b>'+num(f.activity)+'/20</b></div><div class="factor"><span>Fluxo</span><b>'+num(f.flow)+'/20</b></div><div class="factor"><span>Recência</span><b>'+num(f.freshness)+'/15</b></div><div class="factor"><span>Oportunidade</span><b>'+opp+'/100</b></div></div><div class="keygrid" style="margin-top:8px"><div class="metric"><span>Volume 5m</span><b>'+money(x?.volume5m)+'</b></div><div class="metric"><span>Volume 1h</span><b>'+money(x?.volume1h)+'</b></div><div class="metric"><span>Transações 5m</span><b>'+num(x?.tx5m)+'</b></div><div class="metric"><span>Compras / Vendas</span><b>'+num(x?.buys)+' / '+num(x?.sells)+'</b></div></div><div class="flags" style="margin-top:8px">'+(flags.length?'⚠ '+esc(flags.join(' · ')):'✓ Sem flags fortes de risco')+'</div><div class="address" style="margin-top:8px">Contrato: '+esc(x?.address||'')+'</div>'}
 function num(v,fallback=0){const n=Number(v);return Number.isFinite(n)?n:fallback}
 function money(v){const n=Number(v);if(!Number.isFinite(n))return '—';if(n>=1e9)return '$'+(n/1e9).toFixed(2)+'B';if(n>=1e6)return '$'+(n/1e6).toFixed(2)+'M';if(n>=1e3)return '$'+(n/1e3).toFixed(1)+'K';return '$'+n.toFixed(n<1?6:0)}
 function age(v){if(v==null||v==='')return '—';const n=Number(v);if(!Number.isFinite(n))return '—';if(n<60)return Math.max(1,Math.round(n))+'m';if(n<1440)return Math.round(n/60)+'h';return Math.round(n/1440)+'d'}
@@ -183,25 +230,58 @@ function stageBadge(x){if(!x?.stage?.badge)return '';return '<span class="badge 
 function convictionHtml(x){const c=x?.conviction;if(!c)return '';const pros=Array.isArray(c.pros)?c.pros:[],cons=Array.isArray(c.cons)?c.cons:[],verdict=c.verdict||'';return '<div class="conviction-box"><div class="conviction-head"><span class="conviction-title">🧠 Raio-X de Convicção IA</span><span class="conviction-verdict-tag">'+(verdict?'Análise Concluída':'Em avaliação')+'</span></div>'+(verdict?'<div class="conviction-verdict">'+esc(verdict)+'</div>':'')+'<div class="conviction-grid"><div class="conviction-col pros"><div class="conviction-sub">✓ Por que pode valer a pena ('+pros.length+')</div>'+(pros.length?'<ul>'+pros.map(p=>'<li>'+esc(p)+'</li>').join('')+'</ul>':'<div class="conviction-empty">Sem catalisadores fortes identificados no momento.</div>')+'</div><div class="conviction-col cons"><div class="conviction-sub">⚠ Riscos e fragilidades ('+cons.length+')</div>'+(cons.length?'<ul>'+cons.map(cn=>'<li>'+esc(cn)+'</li>').join('')+'</ul>':'<div class="conviction-empty green">Sem alertas graves imediatos.</div>')+'</div></div></div>'}
 function targetsHtml(x){const tgts=Array.isArray(x?.targets)?x.targets:[];if(!tgts.length)return '';const supp=x?.support;return '<div class="targets-box"><div class="targets-title">🎯 Cenários de MarketCap & Projeções de Upside</div><div class="targets-grid">'+tgts.map(t=>'<div class="target-card"><span class="target-label">'+esc(t.label)+'</span><b class="target-mcap">'+money(t.targetMcap)+'</b><div class="target-gain positive">+'+t.gainPct+'% · '+t.multiple+'x</div></div>').join('')+(supp?'<div class="target-card support"><span class="target-label">Suporte / Stop</span><b class="target-mcap">'+money(supp.supportMcap)+'</b><div class="target-gain negative">'+supp.downsidePct+'% risco</div></div>':'')+'</div></div>'}
 function tokenCard(x,i){
- const adjusted=num(x?.adjustedScore),opp=num(x?.opportunity),risk=num(x?.risk),f=x?.factors||{},flags=Array.isArray(x?.riskFlags)?x.riskFlags:[],quality=tokenQuality(x);
+ const adjusted=num(x?.adjustedScore),quality=tokenQuality(x);
  const logo=x?.imageUrl?'<img class="token-logo" src="'+esc(x.imageUrl)+'" alt="" loading="lazy" onerror="this.hidden=true;this.nextElementSibling.hidden=false"><span class="token-logo-fallback" hidden>🪙</span>':'<span class="token-logo-fallback">🪙</span>';
  const liqHealthCls=x?.liqHealth==='good'||x?.liqHealth==='excellent'?'cap-item-health-good':x?.liqHealth==='danger'?'cap-item-health-danger':'cap-item-health-caution';
  const liqRatioTxt=x?.liqRatio!=null&&x?.liqRatio>0?(x.liqRatio.toFixed(1)+'% · '+(x.liqHealthLabel||'')):'—';
  const volMcapTxt=x?.volMcapRatio!=null&&x?.volMcapRatio>0?(x.volMcapRatio.toFixed(0)+'% do MC'+(x.volMcapRatio>=60?' 🔥':'')):'—';
  return '<article class="token '+(x?.alert?'alert':'')+'">'+
   '<div class="token-head"><div class="token-main">'+logo+'<div class="rank">#'+(i+1)+'</div><div><div class="symbol">$'+esc(x?.symbol||'TOKEN')+'</div><div class="name">'+esc(x?.name||'Unknown')+'</div><div class="badges">'+stageBadge(x)+'<span class="badge">'+age(x?.ageMin)+'</span><span class="badge">'+esc(x?.dex||'—')+'</span>'+(x?.discoverySources?.includes('boost')?'<span class="badge">PROMOVIDO</span>':'')+(x?.discoverySources?.includes('tracked')?'<span class="badge">ACOMPANHADO</span>':'')+(x?.alert?'<span class="badge alert">ALERTA SCORE</span>':'')+(hasAiSignal(x)?'<span class="badge alert">SINAL IA</span>':'')+'</div></div></div><div class="token-score-action"><div class="scorebox"><div class="score">'+adjusted+'</div><div class="scorelabel">SCORE AJUSTADO</div></div><button type="button" class="open-token-btn" data-token-address="'+esc(x?.address||'')+'">DEX Screener ↗</button></div></div>'+
-  '<div class="quality-pill '+quality.className+'">'+quality.label+'</div>'+socialLinksHtml(x)+'<div class="scorebar"><i style="width:'+Math.max(0,Math.min(100,adjusted))+'%"></i></div>'+forecastHtml(x)+
-  '<div class="cap-grid"><div class="cap-item"><span>Market cap atual</span><b>'+(num(x?.marketCap)>0?money(x.marketCap):'—')+'</b></div><div class="cap-item"><span>Rácio Liquidez / MC</span><b class="'+liqHealthCls+'">'+liqRatioTxt+'</b></div><div class="cap-item"><span>Rotação Vol 1h / MC</span><b>'+volMcapTxt+'</b></div><div class="cap-item"><span>Cap inicial (1ª deteção)</span><b>'+(x?.initialMarketCap==null?'—':money(x.initialMarketCap))+'</b></div></div>'+
-  convictionHtml(x)+targetsHtml(x)+
-  '<div class="security-panel"><button type="button" class="security-check-btn" data-security-address="'+esc(x?.address||'')+'">🛡️ Verificar Riscos On-Chain (RugCheck)</button><div class="security-result" data-security-result hidden></div></div>'+
-  '<div class="keygrid">'+
-   '<div class="metric"><span>Liquidez</span><b>'+money(x?.liquidity)+'</b></div>'+ '<div class="metric"><span>Preço · 5 min</span><b class="'+pctClass(x?.change5m)+'">'+signedPct(x?.change5m)+'</b></div>'+ '<div class="metric"><span>Rácio compras/vendas</span><b>'+num(x?.buySell).toFixed(2)+'x</b></div>'+ '<div class="metric"><span>Risco · 0–100</span><b class="'+(risk<=35?'positive':risk>55?'negative':'neutral')+'">'+risk+'/100</b></div>'+ '</div>'+
-  '<details class="details"><summary>Métricas técnicas aprofundadas</summary><div class="factor-grid">'+ '<div class="factor"><span>Impulso</span><b>'+num(f.momentum)+'/25</b></div><div class="factor"><span>Liquidez</span><b>'+num(f.liquidity)+'/20</b></div><div class="factor"><span>Atividade</span><b>'+num(f.activity)+'/20</b></div><div class="factor"><span>Fluxo</span><b>'+num(f.flow)+'/20</b></div><div class="factor"><span>Recência</span><b>'+num(f.freshness)+'/15</b></div><div class="factor"><span>Oportunidade</span><b>'+opp+'/100</b></div>'+ '</div><div class="keygrid" style="margin-top:6px"><div class="metric"><span>Volume 5m</span><b>'+money(x?.volume5m)+'</b></div><div class="metric"><span>Volume 1h</span><b>'+money(x?.volume1h)+'</b></div><div class="metric"><span>Transações 5m</span><b>'+num(x?.tx5m)+'</b></div><div class="metric"><span>Compras / vendas</span><b>'+num(x?.buys)+' / '+num(x?.sells)+'</b></div></div>'+ '<div class="flags">'+(flags.length?'⚠ '+esc(flags.join(' · ')):'✓ Sem flags fortes de risco')+'</div><div class="token-info-note">O score resume sinais do scanner; risco e liquidez devem ser lidos em conjunto. Estimativas não são garantias.</div><div class="address">'+esc(x?.address||'')+'</div></details></article>'
+  '<div class="quality-pill '+quality.className+'">'+quality.label+'</div>'+socialLinksHtml(x)+'<div class="scorebar"><i style="width:'+Math.max(0,Math.min(100,adjusted))+'%"></i></div>'+
+  '<div class="cap-grid"><div class="cap-item"><span>Market cap atual</span><b>'+(num(x?.marketCap)>0?money(x.marketCap):'—')+'</b></div><div class="cap-item"><span>Rácio Liquidez / MC</span><b class="'+liqHealthCls+'">'+liqRatioTxt+'</b></div><div class="cap-item"><span>Rotação Vol 1h / MC</span><b>'+volMcapTxt+'</b></div><div class="cap-item"><span>Preço · 5 min</span><b class="'+pctClass(x?.change5m)+'">'+signedPct(x?.change5m)+'</b></div></div>'+
+  buySellPressureHtml(x)+
+  '<div class="card-tabs">'+
+   '<button type="button" class="card-tab active" onclick="switchCardTab(this,\'thesis\')">🧠 Tese IA</button>'+
+   '<button type="button" class="card-tab" onclick="switchCardTab(this,\'targets\')">🎯 Alvos MC</button>'+
+   '<button type="button" class="card-tab" onclick="switchCardTab(this,\'security\')">🛡️ Segurança</button>'+
+   '<button type="button" class="card-tab" onclick="switchCardTab(this,\'forecast\')">⚡ Previsões</button>'+
+   '<button type="button" class="card-tab" onclick="switchCardTab(this,\'tech\')">⚙️ Técnico</button>'+
+  '</div>'+
+  '<div class="card-panels">'+
+   '<div class="card-panel active" data-tab="thesis">'+convictionHtml(x)+'</div>'+
+   '<div class="card-panel" data-tab="targets">'+targetsHtml(x)+'</div>'+
+   '<div class="card-panel" data-tab="security"><div class="security-panel"><button type="button" class="security-check-btn" data-security-address="'+esc(x?.address||'')+'">🛡️ Verificar Riscos On-Chain (RugCheck)</button><div class="security-result" data-security-result hidden></div></div></div>'+
+   '<div class="card-panel" data-tab="forecast">'+forecastHtml(x)+'</div>'+
+   '<div class="card-panel" data-tab="tech">'+techMetricsHtml(x)+'</div>'+
+  '</div>'+
+  '</article>'
+}
+function tokenTableRow(x,i){
+ const adjusted=num(x?.adjustedScore),risk=num(x?.risk),quality=tokenQuality(x);
+ const logo=x?.imageUrl?'<img class="token-logo" style="width:26px;height:26px;border-radius:50%;" src="'+esc(x.imageUrl)+'" alt="" loading="lazy" onerror="this.hidden=true;this.nextElementSibling.hidden=false"><span class="token-logo-fallback" style="width:26px;height:26px;font-size:13px;" hidden>🪙</span>':'<span class="token-logo-fallback" style="width:26px;height:26px;font-size:13px;">🪙</span>';
+ const liqHealthCls=x?.liqHealth==='good'||x?.liqHealth==='excellent'?'cap-item-health-good':x?.liqHealth==='danger'?'cap-item-health-danger':'cap-item-health-caution';
+ const liqRatioTxt=x?.liqRatio!=null&&x?.liqRatio>0?(x.liqRatio.toFixed(1)+'%'):'—';
+ const volMcapTxt=x?.volMcapRatio!=null&&x?.volMcapRatio>0?(x.volMcapRatio.toFixed(0)+'%'):'—';
+ const buys=num(x?.buys),sells=num(x?.sells),total=buys+sells;
+ const buyPct=total>0?Math.round((buys/total)*100):50,sellPct=100-buyPct;
+ const upside=x?.targets?.[1]?.gainPct?('+'+x.targets[1].gainPct+'%'):'—';
+ return '<tr>'+
+  '<td style="color:#71849a;font-weight:800;">#'+(i+1)+'</td>'+
+  '<td><div class="table-token-info">'+logo+'<div><div class="table-token-symbol">$'+esc(x?.symbol||'TOKEN')+' '+stageBadge(x)+'</div><div class="table-token-name">'+esc(x?.name||'Unknown')+' · '+age(x?.ageMin)+'</div></div></div></td>'+
+  '<td><div style="font-weight:900;font-size:13px;color:#f3f7fc;">'+adjusted+'</div><span class="quality-pill '+quality.className+'" style="font-size:8px;padding:2px 6px;margin:2px 0 0 0;display:inline-block;">'+quality.label+'</span></td>'+
+  '<td><div style="font-weight:800;">'+(num(x?.marketCap)>0?money(x.marketCap):'—')+'</div><div style="font-size:10px;color:#8fa2b8;">Ini: '+(x?.initialMarketCap?money(x.initialMarketCap):'—')+'</div></td>'+
+  '<td><div style="font-weight:800;">'+money(x?.liquidity)+'</div><div class="'+liqHealthCls+'" style="font-size:10px;font-weight:800;">'+liqRatioTxt+' MC</div></td>'+
+  '<td><div style="font-weight:800;">'+money(x?.volume1h)+'</div><div style="font-size:10px;color:#8fa2b8;">Rot: '+volMcapTxt+'</div></td>'+
+  '<td><div><b class="'+pctClass(x?.change5m)+'">'+signedPct(x?.change5m)+'</b></div><div style="display:flex;align-items:center;gap:4px;margin-top:3px;" title="'+buyPct+'% compras vs '+sellPct+'% vendas"><div style="height:4px;width:48px;background:#351a21;border-radius:4px;display:flex;overflow:hidden;"><div style="height:100%;background:#57cf89;width:'+buyPct+'%;"></div><div style="height:100%;background:#ff7582;width:'+sellPct+'%;"></div></div><span style="font-size:9px;color:#8fa2b8;">'+buyPct+'%</span></div></td>'+
+  '<td><b class="'+(risk<=35?'positive':risk>55?'negative':'neutral')+'">'+risk+'/100</b></td>'+
+  '<td><b style="color:#79dfa0;">'+upside+'</b></td>'+
+  '<td><button type="button" class="table-action-btn" data-token-address="'+esc(x?.address||'')+'">DEX ↗</button></td>'+
+ '</tr>'
 }
 function filtered(list){let a=[...list],f=document.getElementById('filter')?.value||'all';if(f==='ai')a=a.filter(hasAiSignal);if(f==='top')a=a.filter(x=>num(x?.adjustedScore)>=55&&num(x?.risk)<=55&&num(x?.liquidity)>=10000);if(f==='traction')a=a.filter(x=>x?.stage?.key==='traction');if(f==='runner')a=a.filter(x=>x?.stage?.key==='runner');if(f==='solidliq')a=a.filter(x=>num(x?.liqRatio)>=12);if(f==='alerts')a=a.filter(x=>x?.alert);if(f==='lowrisk')a=a.filter(x=>num(x?.risk)<=35);if(f==='young')a=a.filter(x=>x?.ageMin!=null&&num(x.ageMin)<=30);let s=document.getElementById('sort')?.value||'adjusted';if(s==='adjusted')a.sort((x,y)=>num(y?.adjustedScore)-num(x?.adjustedScore));if(s==='potential')a.sort((x,y)=>{const tx=x?.targets?.[1]?.gainPct||0,ty=y?.targets?.[1]?.gainPct||0;return ty-tx});if(s==='liqratio')a.sort((x,y)=>num(y?.liqRatio)-num(x?.liqRatio));if(s==='opp')a.sort((x,y)=>num(y?.opportunity)-num(x?.opportunity));if(s==='risk')a.sort((x,y)=>num(x?.risk)-num(y?.risk));if(s==='age')a.sort((x,y)=>{const ax=x?.ageMin==null?1e12:num(x.ageMin),ay=y?.ageMin==null?1e12:num(y.ageMin);return ax-ay});if(s==='volume')a.sort((x,y)=>num(y?.volume1h)-num(x?.volume1h));return a}
 function wireTokenButtons(root){root.querySelectorAll('[data-token-address]').forEach(b=>b.addEventListener('click',()=>requestOpenToken(b.dataset.tokenAddress)));root.querySelectorAll('[data-security-address]').forEach(b=>b.addEventListener('click',()=>checkSecurity(b.dataset.securityAddress,b)))}
 async function checkSecurity(address,button){const container=button.closest('.security-panel')||button.parentElement;const result=container?container.querySelector('[data-security-result]'):null;if(!result)return;button.disabled=true;button.textContent='A analisar contrato na RugCheck…';result.hidden=false;result.innerHTML='A consultar o contrato e autoridades na Solana…';try{const response=await fetch('/api/security?address='+encodeURIComponent(address),{cache:'no-store'});const data=await response.json().catch(()=>null);if(!response.ok)throw new Error(data?.error||'Serviço indisponível');const fatalAlerts=[];if(data?.mintAuthorityAlert){fatalAlerts.push('<div class="security-fatal">🚨 MINT ATIVA: O criador pode criar novas moedas infinitamente e despejar no pool!</div>')}if(data?.freezeAuthorityAlert){fatalAlerts.push('<div class="security-fatal">🚨 FREEZE ATIVA: O criador pode congelar a carteira dos compradores impedindo a venda!</div>')}let lpStatus='';if(data?.lpLockedPct!=null){const pct=num(data.lpLockedPct);if(pct>=90){lpStatus='<div class="security-safe">✓ Liquidez Protegida: '+pct.toFixed(1)+'% bloqueada / queimada</div>'}else if(pct<50){lpStatus='<div class="security-warn">⚠ Liquidez em Risco: Apenas '+pct.toFixed(1)+'% bloqueada (criador pode remover a pool)</div>'}else{lpStatus='<div class="security-warn">⚖ Liquidez Parcial: '+pct.toFixed(1)+'% bloqueada</div>'}}else{lpStatus='<div class="security-warn">⚠ Bloqueio de liquidez não confirmado pelo explorador</div>'}const risks=Array.isArray(data?.risks)?data.risks:[];const risksList=risks.length?'<ul style="margin:8px 0;padding-left:16px;">'+risks.slice(0,8).map(r=>'<li><b>'+esc(r.name)+'</b>'+(r.level&&r.level!=='unknown'?' ('+esc(r.level)+')':'')+(r.description?' — '+esc(r.description):'')+'</li>').join('')+'</ul>':'<p style="color:#8be3ae;margin:6px 0;">✓ Sem outros riscos anormais reportados pela RugCheck.</p>';const scoreTxt=data?.score!=null?String(data.score)+' / 100':'—';const programTxt=[data?.tokenProgram,data?.tokenType].filter(Boolean).map(esc).join(' · ')||'Padrão SPL';result.innerHTML='<h4>🛡️ Relatório de Risco On-Chain · '+esc(data?.provider||'RugCheck')+'</h4>'+(fatalAlerts.length?fatalAlerts.join(''):'<div class="security-safe">✓ Sem Mint nem Freeze authority detetados</div>')+lpStatus+'<div class="security-meta-grid"><div class="security-meta-item"><span>Pontuação de Risco</span><b>'+scoreTxt+'</b></div><div class="security-meta-item"><span>Programa do Token</span><b>'+programTxt+'</b></div></div>'+risksList+'<div class="security-caution" style="font-size:9px;color:#8fa2b8;margin-top:7px;">Nota: Relatório informativo externo. Não simula transações de venda nem garante segurança total contra despejos em mercado aberto.</div>'}catch(err){result.innerHTML='<b style="color:#ff9ca5;">Não foi possível obter a análise de segurança.</b><div class="security-caution" style="font-size:10px;margin-top:4px;">'+esc(err?.message||err)+'</div>'}finally{button.disabled=false;button.textContent='🔄 Atualizar Análise On-Chain'}}
-function render(){const a=filtered(tokens),list=document.getElementById('list');document.getElementById('scanCountPill').textContent=a.length+' tokens';list.innerHTML=a.length?a.map(tokenCard).join(''):'<div class="empty">Sem resultados para este filtro.<br><br>Tenta outro filtro ou faz um novo scan.</div>';wireTokenButtons(list);renderTop()}
+function render(){const a=filtered(tokens),list=document.getElementById('list');document.getElementById('scanCountPill').textContent=a.length+' tokens';if(!a.length){list.innerHTML='<div class="empty">Sem resultados para este filtro.<br><br>Tenta outro filtro ou faz um novo scan.</div>'}else if(currentViewMode==='table'){list.innerHTML='<div class="table-container"><table class="token-table"><thead><tr><th>#</th><th>Token</th><th>Score</th><th>MarketCap</th><th>Liquidez</th><th>Vol 1h</th><th>Preço / Fluxo</th><th>Risco</th><th>Upside T2</th><th>Ação</th></tr></thead><tbody>'+a.map(tokenTableRow).join('')+'</tbody></table></div>'}else{list.innerHTML=a.map(tokenCard).join('')}wireTokenButtons(list);renderTop()}
 function renderTop(){const a=[...tokens].filter(x=>num(x?.adjustedScore)>=55&&num(x?.risk)<=55&&num(x?.liquidity)>=10000).sort((x,y)=>num(y?.adjustedScore)-num(x?.adjustedScore)),list=document.getElementById('topList');document.getElementById('topCount').textContent=a.length+' tokens';list.innerHTML=a.length?a.slice(0,20).map(tokenCard).join(''):'<div class="empty">Ainda não existem tokens que cumpram os critérios do Top.</div>';wireTokenButtons(list)}
 function resultLabel(x){const result=String(x?.result||'');const hit25=!!(x?.hit25_at||result.includes('hit25'));const hit10=!!(x?.hit10_at||result.includes('hit10')||hit25);const stop=!!(x?.stop20_at||result.includes('stop20'));const parts=[];if(hit25)parts.push('+25%');else if(hit10)parts.push('+10%');if(stop)parts.push('-20%');if(!parts.length)return ['🟡 A acompanhar','neutral'];const cls=stop&&!hit10&&!hit25?'negative':stop?'neutral':'positive';const icon=stop&&(hit10||hit25)?'⚖ ':hit25?'🎯 ':hit10?'🟢 ':'🔴 ';return [icon+parts.join(' e '),cls]}
 function minsLabel(first,at){if(!first||!at)return '—';const m=Math.max(0,(num(at)-num(first))/60000);if(m<60)return Math.round(m)+' min';if(m<1440)return (m/60).toFixed(1)+' h';return (m/1440).toFixed(1)+' d'}
