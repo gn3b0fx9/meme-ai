@@ -128,6 +128,178 @@ function socialLinks(info, extraLinks = []) {
   return links.slice(0, 6);
 }
 
+function buildDecisionMetrics({ mcap, liq, vol1h, vol5m, buys, sells, tx5, ratio, change5, change1h, ageMin, acceleration, opportunity, risk, adjustedScore, discovery }) {
+  const liqRatio = mcap > 0 ? (liq / mcap) * 100 : 0;
+  let liqHealth = "unknown";
+  let liqHealthLabel = "—";
+  if (mcap > 0) {
+    if (liqRatio < 6) {
+      liqHealth = "danger";
+      liqHealthLabel = "Perigosa (<6%) · Alto risco de slippage";
+    } else if (liqRatio < 12) {
+      liqHealth = "caution";
+      liqHealthLabel = "Baixa (6-12%) · Pouca profundidade";
+    } else if (liqRatio < 25) {
+      liqHealth = "good";
+      liqHealthLabel = "Saudável (12-25%) · Boa sustentação";
+    } else {
+      liqHealth = "excellent";
+      liqHealthLabel = "Sólida (>25%) · Forte piso de liquidez";
+    }
+  }
+
+  const volMcapRatio = mcap > 0 ? (vol1h / mcap) * 100 : 0;
+
+  let stage;
+  if (ageMin != null && ageMin < 45) {
+    stage = {
+      key: "sniping",
+      name: "Fase 1 · Lançamento / Sniping",
+      badge: "LANÇAMENTO",
+      badgeClass: "stage-sniping",
+      risk: "Extremo",
+      desc: "Token muito jovem (<45m). Altíssima volatilidade e risco de dump dos criadores ou snipers."
+    };
+  } else if (mcap < 350000 || (ageMin != null && ageMin < 720)) {
+    stage = {
+      key: "traction",
+      name: "Fase 2 · Tração / Breakout",
+      badge: "TRAÇÃO",
+      badgeClass: "stage-traction",
+      risk: "Alto",
+      desc: "Fase de consolidação ($60K-$350K MC). Ponto onde se define se vira comunidade ou morre."
+    };
+  } else {
+    stage = {
+      key: "runner",
+      name: "Fase 3 · Runner / Consolidada",
+      badge: "RUNNER",
+      badgeClass: "stage-runner",
+      risk: "Moderado",
+      desc: "MarketCap acima de $350K. Menor risco de rug súbito, mas precisa de volume constante para subir."
+    };
+  }
+
+  const pros = [];
+  const cons = [];
+
+  if (liq >= 30000 && liqRatio >= 12) {
+    pros.push(`Liquidez expressiva: ${money(liq)} (${liqRatio.toFixed(1)}% do MC), o que amortece vendas grandes.`);
+  } else if (liq >= 15000) {
+    pros.push(`Pool de liquidez acima do mínimo de segurança (${money(liq)}).`);
+  }
+  if (liqRatio < 6 && mcap >= 50000) {
+    cons.push(`Liquidez fina (${liqRatio.toFixed(1)}% do MC): qualquer ordem de venda média derrete o preço.`);
+  } else if (liq < 10000) {
+    cons.push(`Liquidez muito reduzida (${money(liq)}): risco extremo de manipulação e falta de saída.`);
+  }
+
+  if (ratio >= 1.5 && tx5 >= 25) {
+    pros.push(`Forte pressão compradora: ${buys} compras vs ${sells} vendas nos últimos 5m (${ratio.toFixed(1)}x a favor).`);
+  } else if (ratio >= 1.1 && tx5 >= 15) {
+    pros.push(`Fluxo comprador superior às vendas (${buys} compras vs ${sells} vendas nos 5m).`);
+  }
+  if (sells > buys && tx5 >= 15) {
+    cons.push(`Pressão vendedora dominante: ${sells} vendas vs ${buys} compras nos últimos 5m.`);
+  } else if (sells === 0 && buys > 10) {
+    cons.push(`Compras sem nenhuma venda nos últimos 5m (verificar se o token permite vender).`);
+  }
+
+  if (volMcapRatio >= 60 && mcap > 0) {
+    pros.push(`Volume 1h muito ativo: ${money(vol1h)} representa ${volMcapRatio.toFixed(0)}% do MarketCap total.`);
+  }
+  if (acceleration >= 2.0 && vol1h > 5000) {
+    pros.push(`Aceleração de volume detetada: ${acceleration.toFixed(1)}x acima do ritmo da última hora.`);
+  }
+  if (vol1h < 3000 && ageMin != null && ageMin > 60) {
+    cons.push(`Volume 1h em queda (${money(vol1h)}): token a perder tração e liquidez de negociação.`);
+  }
+
+  if (change1h > 15 && change1h < 120 && change5 > 0) {
+    pros.push(`Tendência de alta estável: +${change1h.toFixed(1)}% na última hora sem pump parabólico irracional.`);
+  }
+  if (change5 < -20) {
+    cons.push(`Queda acentuada de curto prazo: ${change5.toFixed(1)}% nos últimos 5 minutos.`);
+  } else if (change5 > 100) {
+    cons.push(`Subida vertical parabólica (+${change5.toFixed(0)}% em 5m): alto risco de correção imediata.`);
+  }
+
+  if (ageMin != null && ageMin >= 180) {
+    pros.push(`Sobreviveu à fase inicial de lançamento (${age(ageMin)} de vida).`);
+  }
+  if (discovery?.communityTakeover) {
+    pros.push(`Projeto assumido pela comunidade (CTO / Community Takeover).`);
+  }
+  if (num(discovery?.boostTotal) >= 10) {
+    pros.push(`Comunidade a impulsionar ativamente com ${num(discovery.boostTotal)} boosts.`);
+  }
+
+  let verdict = "";
+  if (pros.length >= 3 && cons.length <= 1 && adjustedScore >= 55) {
+    verdict = "Tese Favorável: Boa estrutura de liquidez e volume com pressão compradora real. Candidato interessante para entrada escalonada com stop definido.";
+  } else if (stage.key === "sniping") {
+    verdict = "Especulação Sniping: Moeda em nascimento. Apenas para posições pequenas e rápidas; proteja o capital contra despejo inicial.";
+  } else if (cons.length >= 2 || risk > 55) {
+    verdict = "Alerta de Cautela: Existem fragilidades evidentes (liquidez fina ou pressão de venda). Não recomendado entrar antes de estabilizar.";
+  } else if (adjustedScore >= 45) {
+    verdict = "Fase de Monitorização: O token tem atividade, mas ainda não confirmou volume suficiente para justificar uma tese forte de compra.";
+  } else {
+    verdict = "Baixa Convicção: Risco elevado em relação ao potencial atual. Manter sob observação.";
+  }
+
+  const targets = [];
+  let support = null;
+
+  if (mcap > 0) {
+    const steps = [60000, 150000, 300000, 600000, 1200000, 2500000, 5000000, 10000000, 25000000, 50000000];
+    const higherSteps = steps.filter(s => s > mcap * 1.25);
+    const chosenTargets = higherSteps.slice(0, 3);
+    if (chosenTargets.length < 3) {
+      if (!chosenTargets.length) {
+        chosenTargets.push(Math.round(mcap * 2), Math.round(mcap * 5), Math.round(mcap * 10));
+      } else if (chosenTargets.length === 1) {
+        chosenTargets.push(Math.round(chosenTargets[0] * 2.5), Math.round(chosenTargets[0] * 5));
+      } else if (chosenTargets.length === 2) {
+        chosenTargets.push(Math.round(chosenTargets[1] * 2.5));
+      }
+    }
+
+    const labels = ["Alvo Conservador", "Alvo Médio (Runner)", "Alvo Otimista (Moon)"];
+    for (let i = 0; i < chosenTargets.length; i++) {
+      const tgtMcap = chosenTargets[i];
+      const multiple = tgtMcap / mcap;
+      const gainPct = (multiple - 1) * 100;
+      targets.push({
+        label: labels[i] || `Alvo ${i + 1}`,
+        targetMcap: tgtMcap,
+        multiple: Number(multiple.toFixed(1)),
+        gainPct: Math.round(gainPct)
+      });
+    }
+
+    const suppMcap = Math.max(1000, Math.round(mcap * 0.65));
+    support = {
+      supportMcap: suppMcap,
+      downsidePct: -35
+    };
+  }
+
+  return {
+    liqRatio: Number(liqRatio.toFixed(1)),
+    liqHealth,
+    liqHealthLabel,
+    volMcapRatio: Number(volMcapRatio.toFixed(1)),
+    stage,
+    conviction: {
+      pros,
+      cons,
+      verdict
+    },
+    targets,
+    support
+  };
+}
+
 function scorePair(pair, discovery = {}) {
   const liq = num(pair?.liquidity?.usd);
   const vol1h = num(pair?.volume?.h1);
@@ -155,6 +327,9 @@ function scorePair(pair, discovery = {}) {
     : ageMin <= 5 ? 15 : ageMin <= 15 ? 13 : ageMin <= 30 ? 11 : ageMin <= 60 ? 8 : ageMin <= 180 ? 5 : 2;
   const opportunity = Math.max(0, Math.min(100, Math.round(momentum + liquidity + activity + flow + freshness)));
 
+  const mcap = num(pair?.marketCap || pair?.fdv);
+  const liqRatio = mcap > 0 ? (liq / mcap) * 100 : 0;
+
   let risk = 10;
   const flags = [];
   if (liq < 10000) { risk += 20; flags.push("liquidez baixa"); }
@@ -166,14 +341,41 @@ function scorePair(pair, discovery = {}) {
   else if (ratio < 0.7) { risk += 15; flags.push("mais vendas"); }
   if (ageMin != null && ageMin < 15 && liq < 25000) { risk += 12; flags.push("muito novo + pouca liquidez"); }
   if (acceleration > 8 && liq < 15000) { risk += 8; flags.push("aceleração com pouca liquidez"); }
+
+  // Armadilhas de liquidez relativa ao MarketCap
+  if (mcap >= 50000 && liqRatio < 5) {
+    risk += 25;
+    flags.push("armadilha de liquidez: <5% do MC");
+  } else if (mcap >= 40000 && liqRatio < 8) {
+    risk += 16;
+    flags.push("liquidez rasa para o MC (<8%)");
+  }
+
+  // Falta de volume pós-lançamento
+  if (ageMin != null && ageMin > 90 && vol1h < 1500) {
+    risk += 14;
+    flags.push("volume em colapso (<$1.5k/h)");
+  }
+
+  // Market cap residual / moeda abandonada
+  if (ageMin != null && ageMin > 60 && mcap > 0 && mcap < 15000) {
+    risk += 14;
+    flags.push("market cap residual (<$15k)");
+  }
+
   risk = Math.max(0, Math.min(100, Math.round(risk)));
   const adjustedScore = Math.max(0, Math.min(100, Math.round(opportunity - risk * 0.45)));
+
+  const decision = buildDecisionMetrics({
+    mcap, liq, vol1h, vol5m, buys, sells, tx5, ratio, change5, change1h,
+    ageMin, acceleration, opportunity, risk, adjustedScore, discovery
+  });
 
   return {
     address: pair?.baseToken?.address || "", symbol: pair?.baseToken?.symbol || "TOKEN",
     name: pair?.baseToken?.name || "Unknown", url: pair?.url || "", dex: pair?.dexId || "—",
     imageUrl: /^https:\/\/cdn\.dexscreener\.com\//i.test(String(pair?.info?.imageUrl || "")) ? pair.info.imageUrl : "",
-    priceUsd: num(pair?.priceUsd), marketCap: num(pair?.marketCap || pair?.fdv), liquidity: liq,
+    priceUsd: num(pair?.priceUsd), marketCap: mcap, liquidity: liq,
     volume5m: vol5m, volume1h: vol1h, tx5m: tx5, buys, sells, buySell: ratio,
     change5m: change5, change1h, acceleration, ageMin, opportunity, risk, adjustedScore,
     discoverySources: Array.isArray(discovery.sources) ? discovery.sources : [],
@@ -182,7 +384,8 @@ function scorePair(pair, discovery = {}) {
     communityTakeover: Boolean(discovery.communityTakeover),
     riskFlags: flags,
     alert: opportunity >= 72 && risk <= 55,
-    factors: { momentum: Math.round(momentum), liquidity: Math.round(liquidity), activity: Math.round(activity), flow: Math.round(flow), freshness }
+    factors: { momentum: Math.round(momentum), liquidity: Math.round(liquidity), activity: Math.round(activity), flow: Math.round(flow), freshness },
+    ...decision
   };
 }
 

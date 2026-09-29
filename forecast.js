@@ -14,12 +14,16 @@ const num = (v, fallback = 0) => {
 function modelFeatures(x) {
   const c = (v, lo, hi) => Math.max(lo, Math.min(hi, num(v)));
   const age = x?.ageMin == null || !Number.isFinite(Number(x.ageMin)) ? 1440 : num(x.ageMin);
+  const liq = Math.max(1, num(x?.liquidity));
+  const mcap = num(x?.marketCap || x?.mcap);
+  const liqRatio = mcap > 0 ? (liq / mcap) : (x?.liqRatio ? num(x.liqRatio) / 100 : 0.15);
   return [1, c(x?.adjustedScore, 0, 100) / 100, c(x?.risk, 0, 100) / 100,
     c(x?.change5m, -50, 50) / 50, c(x?.change1h, -100, 100) / 100,
-    c(Math.log10(Math.max(1, num(x?.liquidity))), 0, 8) / 8,
+    c(Math.log10(liq), 0, 8) / 8,
     c(Math.log10(Math.max(1, num(x?.volume1h))), 0, 9) / 9,
     c(x?.buySell, 0, 5) / 5, c(age, 0, 10080) / 10080,
-    c(x?.acceleration, 0, 20) / 20];
+    c(x?.acceleration, 0, 20) / 20,
+    c(liqRatio, 0, 0.5) / 0.5];
 }
 
 function trainHorizon(rows) {
@@ -27,24 +31,26 @@ function trainHorizon(rows) {
   if (data.length < 100) return { trained: false, samples: data.length };
   const xs = data.map(x => modelFeatures({ adjustedScore: x.entry_score, risk: x.entry_risk,
     change5m: x.change5m, change1h: x.change1h, liquidity: x.liquidity,
-    volume1h: x.volume1h, buySell: x.buy_sell, ageMin: x.age_min, acceleration: x.acceleration }));
+    volume1h: x.volume1h, buySell: x.buy_sell, ageMin: x.age_min, acceleration: x.acceleration,
+    marketCap: x.entry_mcap || x.mcap }));
   const returns = data.map(x => Math.max(-80, Math.min(200,
     (num(x.exit_price) / num(x.entry_price) - 1) * 100)));
   const labels = returns.map(y => y > 0 ? 1 : 0);
   const trainCount = Math.max(1, Math.floor(data.length * 0.8));
-  let logistic = Array(10).fill(0), regression = Array(10).fill(0);
+  const featureCount = xs[0]?.length || 11;
+  let logistic = Array(featureCount).fill(0), regression = Array(featureCount).fill(0);
   for (let epoch = 0; epoch < 20; epoch++) {
-    const g = Array(10).fill(0), rg = Array(10).fill(0);
+    const g = Array(featureCount).fill(0), rg = Array(featureCount).fill(0);
     for (let i = 0; i < trainCount; i++) {
       const z = Math.max(-20, Math.min(20, logistic.reduce((s, w, j) => s + w * xs[i][j], 0)));
       const probability = 1 / (1 + Math.exp(-z));
       const estimate = regression.reduce((s, w, j) => s + w * xs[i][j], 0);
-      for (let j = 0; j < 10; j++) {
+      for (let j = 0; j < featureCount; j++) {
         g[j] += (probability - labels[i]) * xs[i][j];
         rg[j] += (estimate - returns[i] / 100) * xs[i][j];
       }
     }
-    for (let j = 0; j < 10; j++) {
+    for (let j = 0; j < featureCount; j++) {
       logistic[j] -= 0.04 * (g[j] / trainCount + 0.0005 * logistic[j]);
       regression[j] -= 0.04 * (rg[j] / trainCount + 0.0005 * regression[j]);
     }
