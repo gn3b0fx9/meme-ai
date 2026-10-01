@@ -373,7 +373,7 @@ function scorePair(pair, discovery = {}) {
 
   return {
     address: pair?.baseToken?.address || "", symbol: pair?.baseToken?.symbol || "TOKEN",
-    name: pair?.baseToken?.name || "Unknown", url: pair?.url || "", dex: pair?.dexId || "—",
+    name: pair?.baseToken?.name || "Unknown", url: pair?.url || "", pairAddress: String(pair?.pairAddress || ""), dex: pair?.dexId || "—",
     imageUrl: /^https:\/\/cdn\.dexscreener\.com\//i.test(String(pair?.info?.imageUrl || "")) ? pair.info.imageUrl : "",
     priceUsd: num(pair?.priceUsd), marketCap: mcap, liquidity: liq,
     volume5m: vol5m, volume1h: vol1h, tx5m: tx5, buys, sells, buySell: ratio,
