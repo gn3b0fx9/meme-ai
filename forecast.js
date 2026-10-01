@@ -26,6 +26,10 @@ function modelFeatures(x) {
     c(liqRatio, 0, 0.5) / 0.5];
 }
 
+const MIN_VALIDATION_SAMPLES = 40;
+const dotProduct = (w, x) => { let s = 0; for (let j = 0; j < w.length; j++) s += w[j] * x[j]; return s; };
+const sigmoid = z => 1 / (1 + Math.exp(-Math.max(-20, Math.min(20, z))));
+
 function trainHorizon(rows) {
   const data = rows.filter(x => num(x.entry_price) > 0 && num(x.exit_price) > 0);
   if (data.length < 100) return { trained: false, samples: data.length };
@@ -37,34 +41,42 @@ function trainHorizon(rows) {
     (num(x.exit_price) / num(x.entry_price) - 1) * 100)));
   const labels = returns.map(y => y > 0 ? 1 : 0);
   const trainCount = Math.max(1, Math.floor(data.length * 0.8));
-  const featureCount = xs[0]?.length || 11;
-  let logistic = Array(featureCount).fill(0), regression = Array(featureCount).fill(0);
-  for (let epoch = 0; epoch < 20; epoch++) {
-    const g = Array(featureCount).fill(0), rg = Array(featureCount).fill(0);
+  const d = xs[0].length;
+  // O bias comeca na taxa base / retorno medio: sem sinal, o modelo devolve a taxa base (nao 50%).
+  let baseRate = 0, meanRet = 0;
+  for (let i = 0; i < trainCount; i++) { baseRate += labels[i]; meanRet += returns[i] / 100; }
+  baseRate = Math.min(0.98, Math.max(0.02, baseRate / trainCount)); meanRet /= trainCount;
+  const logistic = Array(d).fill(0), regression = Array(d).fill(0);
+  logistic[0] = Math.log(baseRate / (1 - baseRate)); regression[0] = meanRet;
+  const EPOCHS = 250, LR_LOGISTIC = 0.5, LR_REGRESSION = 0.1, L2 = 0.002;
+  const g = Array(d), rg = Array(d);
+  for (let epoch = 0; epoch < EPOCHS; epoch++) {
+    g.fill(0); rg.fill(0);
     for (let i = 0; i < trainCount; i++) {
-      const z = Math.max(-20, Math.min(20, logistic.reduce((s, w, j) => s + w * xs[i][j], 0)));
-      const probability = 1 / (1 + Math.exp(-z));
-      const estimate = regression.reduce((s, w, j) => s + w * xs[i][j], 0);
-      for (let j = 0; j < featureCount; j++) {
-        g[j] += (probability - labels[i]) * xs[i][j];
-        rg[j] += (estimate - returns[i] / 100) * xs[i][j];
-      }
+      const xi = xs[i];
+      const pe = sigmoid(dotProduct(logistic, xi)) - labels[i];
+      const re = dotProduct(regression, xi) - returns[i] / 100;
+      for (let j = 0; j < d; j++) { g[j] += pe * xi[j]; rg[j] += re * xi[j]; }
     }
-    for (let j = 0; j < featureCount; j++) {
-      logistic[j] -= 0.04 * (g[j] / trainCount + 0.0005 * logistic[j]);
-      regression[j] -= 0.04 * (rg[j] / trainCount + 0.0005 * regression[j]);
+    for (let j = 0; j < d; j++) {
+      const reg = j === 0 ? 0 : L2;
+      logistic[j] -= LR_LOGISTIC * (g[j] / trainCount + reg * logistic[j]);
+      regression[j] -= LR_REGRESSION * (rg[j] / trainCount + reg * regression[j]);
     }
   }
   let tp = 0, tn = 0, fp = 0, fn = 0;
   for (let i = trainCount; i < xs.length; i++) {
-    const z = Math.max(-20, Math.min(20, logistic.reduce((s, w, j) => s + w * xs[i][j], 0)));
-    const predicted = 1 / (1 + Math.exp(-z)) >= 0.5, actual = labels[i] === 1;
+    const predicted = sigmoid(dotProduct(logistic, xs[i])) >= 0.5, actual = labels[i] === 1;
     if (predicted && actual) tp++; else if (!predicted && !actual) tn++; else if (predicted) fp++; else fn++;
   }
-  const sensitivity = tp + fn ? tp / (tp + fn) : 0;
-  const specificity = tn + fp ? tn / (tn + fp) : 0;
-  return { trained: true, samples: data.length, logistic, regression,
-    validationSamples: xs.length - trainCount, validationBalancedAccuracy: (sensitivity + specificity) / 2 * 100 };
+  const P = tp + fn, N = tn + fp;
+  const sensitivity = P ? tp / P : 0, specificity = N ? tn / N : 0;
+  const ba = (sensitivity + specificity) / 2;
+  // Erro-padrao da accuracy balanceada: com poucos exemplos, 60% e indistinguivel de sorte.
+  const se = P && N ? 0.5 * Math.sqrt(sensitivity * (1 - sensitivity) / P + specificity * (1 - specificity) / N) : 1;
+  return { trained: true, samples: data.length, logistic, regression, baseRate: baseRate * 100,
+    validationSamples: xs.length - trainCount, validationBalancedAccuracy: ba * 100,
+    validationLowerBound: (ba - 1.645 * se) * 100 };
 }
 
 function pickObservation(list, entryAt, due, windowStart, windowEnd) {
@@ -85,9 +97,18 @@ function pickObservation(list, entryAt, due, windowStart, windowEnd) {
   return { inWindow: best, lastAfterEntry };
 }
 
+export async function pendingSampleAddresses(db, limit = 200) {
+  const r = await db.prepare(`
+    SELECT address FROM prediction_samples
+    WHERE short_status = 'pending' OR medium_status = 'pending' OR long_status = 'pending'
+    GROUP BY address ORDER BY MIN(entry_at) ASC LIMIT ?
+  `).bind(limit).all();
+  return (r.results || []).map(row => row.address).filter(Boolean);
+}
+
 async function resolvePendingForecasts(db, now) {
   const pending = await db.prepare(`
-    SELECT id, address, entry_at,
+    SELECT id, address, entry_at, entry_price,
       short_due, medium_due, long_due,
       short_status, medium_status, long_status
     FROM prediction_samples
@@ -120,6 +141,7 @@ async function resolvePendingForecasts(db, now) {
     }
   }
 
+  const stmts = [];
   for (const row of rows) {
     const list = obsByAddress.get(row.address) || [];
     const sets = [];
@@ -132,20 +154,23 @@ async function resolvePendingForecasts(db, now) {
       let exitPrice = num(picked.inWindow?.price);
       if (exitPrice <= 0) {
         if (now < due + h.expireGrace) continue;
-        exitPrice = num(picked.lastAfterEntry?.price);
-        if (exitPrice <= 0) {
-          sets.push(`${h.key}_status = 'expired'`);
-          continue;
-        }
+        // Sem observacao perto do prazo: o token deixou de aparecer (morto/retirado). Descartar estes casos
+        // deixa so os sobreviventes no treino e infla as probabilidades; contam como perda de -80%
+        // (o minimo ja usado pelo modelo). Se ainda ha dados recentes, usa-se o ultimo preco conhecido.
+        const lastPrice = num(picked.lastAfterEntry?.price);
+        const lastAt = num(picked.lastAfterEntry?.seen_at);
+        const stale = lastPrice <= 0 || lastAt < due - h.ms * 0.5;
+        exitPrice = stale ? num(row.entry_price) * 0.2 : lastPrice;
+        if (exitPrice <= 0) { sets.push(`${h.key}_status = 'expired'`); continue; }
       }
       sets.push(`${h.key}_exit = ?`);
       sets.push(`${h.key}_status = 'complete'`);
       values.push(exitPrice);
     }
     if (!sets.length) continue;
-    await db.prepare(`UPDATE prediction_samples SET ${sets.join(", ")} WHERE id = ?`)
-      .bind(...values, row.id).run();
+    stmts.push(db.prepare(`UPDATE prediction_samples SET ${sets.join(", ")} WHERE id = ?`).bind(...values, row.id));
   }
+  for (let i = 0; i < stmts.length; i += 80) await db.batch(stmts.slice(i, i + 80));
 }
 
 export async function attachForecasts(db, tokens) {
@@ -163,7 +188,7 @@ export async function attachForecasts(db, tokens) {
       }
       const r = await db.prepare(`SELECT * FROM (
         SELECT entry_price, ${exitColumn} AS exit_price, entry_score, entry_risk, change5m, change1h,
-          liquidity, volume1h, buy_sell, age_min, acceleration, entry_at
+          liquidity, volume1h, buy_sell, age_min, acceleration, entry_mcap, entry_at
         FROM prediction_samples WHERE ${h.key}_status = 'complete'
         ORDER BY entry_at DESC LIMIT 1200
       ) ORDER BY entry_at ASC`).all();
@@ -184,7 +209,7 @@ export async function attachForecasts(db, tokens) {
       const dot = weights => weights.reduce((sum, w, i) => sum + w * f[i], 0);
       const z = Math.max(-20, Math.min(20, dot(model.logistic)));
       token.forecasts[h.key] = { horizon: h.label, ready: true, applicable, samples: model.samples,
-        validated: model.validationSamples >= 20 && model.validationBalancedAccuracy >= 60,
+        validated: model.validationSamples >= MIN_VALIDATION_SAMPLES && model.validationBalancedAccuracy >= 60 && model.validationLowerBound > 50,
         validationBalancedAccuracy: Math.round(model.validationBalancedAccuracy),
         validationSamples: model.validationSamples,
         probabilityUp: Math.round(100 / (1 + Math.exp(-z))),
@@ -193,29 +218,35 @@ export async function attachForecasts(db, tokens) {
   }
 }
 
-export async function saveForecastSamples(db, tokens, now) {
+export async function saveForecastSamples(db, tokens, now, pendingAddresses = null) {
   const day = new Date(now).toISOString().slice(0, 10);
+  const pending = pendingAddresses ? new Set(pendingAddresses) : null;
+  const stmts = [];
   for (const x of tokens) {
     if (!x?.address || num(x.priceUsd) <= 0) continue;
     const price = num(x.priceUsd);
-    const sets = [], values = [];
-    for (const h of FORECAST_HORIZONS) {
-      const k = h.key;
-      sets.push(`${k}_exit=CASE WHEN ${k}_status='pending' AND ? >= ${k}_due - ${h.earlyMs} AND ? <= ${k}_due + ${h.tolerance} AND ? > 0 THEN ? ELSE ${k}_exit END`);
-      sets.push(`${k}_status=CASE WHEN ${k}_status='pending' AND ? >= ${k}_due - ${h.earlyMs} AND ? <= ${k}_due + ${h.tolerance} AND ? > 0 THEN 'complete' ELSE ${k}_status END`);
-      values.push(now, now, price, price, now, now, price);
+    if (!pending || pending.has(x.address)) {
+      const sets = [], values = [];
+      for (const h of FORECAST_HORIZONS) {
+        const k = h.key;
+        // Captura so a partir do prazo (antes usava due - earlyMs e encurtava o horizonte real).
+        sets.push(`${k}_exit=CASE WHEN ${k}_status='pending' AND ? >= ${k}_due AND ? <= ${k}_due + ${h.tolerance} AND ? > 0 THEN ? ELSE ${k}_exit END`);
+        sets.push(`${k}_status=CASE WHEN ${k}_status='pending' AND ? >= ${k}_due AND ? <= ${k}_due + ${h.tolerance} AND ? > 0 THEN 'complete' ELSE ${k}_status END`);
+        values.push(now, now, price, price, now, now, price);
+      }
+      stmts.push(db.prepare(`UPDATE prediction_samples SET ${sets.join(", ")} WHERE address=?`).bind(...values, x.address));
     }
-    await db.prepare(`UPDATE prediction_samples SET ${sets.join(", ")} WHERE address=?`).bind(...values, x.address).run();
     if (num(x.adjustedScore) < 45) continue;
-    await db.prepare(`INSERT OR IGNORE INTO prediction_samples (
+    stmts.push(db.prepare(`INSERT OR IGNORE INTO prediction_samples (
       address,day_key,entry_at,entry_price,entry_score,entry_risk,change5m,change1h,
-      liquidity,volume1h,buy_sell,age_min,acceleration,short_due,medium_due,long_due
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      liquidity,volume1h,buy_sell,age_min,acceleration,entry_mcap,short_due,medium_due,long_due
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
       x.address, day, now, price, num(x.adjustedScore), num(x.risk), num(x.change5m),
       num(x.change1h), num(x.liquidity), num(x.volume1h), num(x.buySell),
       x.ageMin == null ? null : num(x.ageMin),
-      num(x.acceleration), now + 3600000, now + 86400000, now + 604800000
-    ).run();
+      num(x.acceleration), num(x.marketCap), now + 3600000, now + 86400000, now + 604800000
+    ));
   }
+  for (let i = 0; i < stmts.length; i += 80) await db.batch(stmts.slice(i, i + 80));
   await resolvePendingForecasts(db, now);
 }

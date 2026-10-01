@@ -1,4 +1,4 @@
-import { attachForecasts, saveForecastSamples } from "./forecast.js";
+import { attachForecasts, saveForecastSamples, pendingSampleAddresses } from "./forecast.js";
 import { page } from "./ui.js";
 
 const DEX = "https://api.dexscreener.com";
@@ -521,12 +521,18 @@ async function scan(env) {
     }
   }
   try {
+    await ensureSchema(env.DB);
     const r = await env.DB.prepare("SELECT address FROM tracked_tokens ORDER BY last_seen DESC LIMIT 500").all();
     for (const row of (r.results || [])) {
       if (!row.address) continue;
       const current = discovery.get(row.address) || { sources: [], boostAmount: 0, boostTotal: 0, communityTakeover: false, links: [] };
       if (!current.sources.includes("tracked")) current.sources.push("tracked");
       discovery.set(row.address, current);
+    }
+    for (const address of await pendingSampleAddresses(env.DB, 200)) {
+      const current = discovery.get(address) || { sources: [], boostAmount: 0, boostTotal: 0, communityTakeover: false, links: [] };
+      if (!current.sources.includes("tracked")) current.sources.push("tracked");
+      discovery.set(address, current);
     }
     sourceStatus.tracked = "ok";
   } catch (err) {
@@ -705,6 +711,10 @@ async function ensureSchema(db) {
     long_status TEXT DEFAULT 'pending',
     UNIQUE(address, day_key)
   )`).run();
+  const psInfo = await db.prepare("PRAGMA table_info(prediction_samples)").all();
+  if (!(psInfo.results || []).some(c => c.name === "entry_mcap")) {
+    await db.prepare("ALTER TABLE prediction_samples ADD COLUMN entry_mcap REAL").run();
+  }
   await db.prepare(`CREATE INDEX IF NOT EXISTS idx_prediction_samples_horizons
     ON prediction_samples(short_status, medium_status, long_status, entry_at)`).run();
 
@@ -724,6 +734,9 @@ async function ensureSchema(db) {
   }
 
   await db.prepare(`CREATE INDEX IF NOT EXISTS idx_obs_seen_at ON observations(seen_at)`).run();
+  await db.prepare("CREATE TABLE IF NOT EXISTS alert_log (address TEXT NOT NULL, sent_at INTEGER NOT NULL, tier TEXT)").run();
+  await db.prepare("CREATE INDEX IF NOT EXISTS idx_alert_log ON alert_log(address, sent_at)").run();
+  await db.prepare("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)").run();
   schemaReady = true;
 }
 
@@ -737,16 +750,25 @@ async function persistScan(db, tokens) {
   const retentionCutoff = now - 30 * 24 * 60 * 60 * 1000;
   await db.prepare("DELETE FROM observations WHERE seen_at < ?").bind(retentionCutoff).run();
 
+  const trackedRows = new Map();
+  const allAddresses = [...new Set(tokens.map(t => t?.address).filter(Boolean))];
+  for (let i = 0; i < allAddresses.length; i += 80) {
+    const group = allAddresses.slice(i, i + 80);
+    const res = await db.prepare(
+      "SELECT * FROM tracked_tokens WHERE address IN (" + group.map(() => "?").join(",") + ")"
+    ).bind(...group).all();
+    for (const row of res.results || []) trackedRows.set(row.address, row);
+  }
+  const pendingSet = new Set(await pendingSampleAddresses(db, 500));
+  const stmts = [];
+
   for (const x of tokens) {
     if (!x?.address) continue;
     const validPrice = hasValidPrice(x);
-
-    const old = await db.prepare(
-      "SELECT * FROM tracked_tokens WHERE address = ?"
-    ).bind(x.address).first();
+    const old = trackedRows.get(x.address);
 
     if (!old && shouldTrack(x) && validPrice) {
-      await db.prepare(`
+      stmts.push(db.prepare(`
         INSERT INTO tracked_tokens (
           address, symbol, name, first_seen,
           initial_price, initial_mcap, initial_opportunity, initial_risk,
@@ -781,9 +803,9 @@ async function persistScan(db, tokens) {
         num(x.boostTotal),
         x.communityTakeover ? 1 : 0,
         x.imageUrl || null
-      ).run();
+      ));
     } else if (old && !validPrice) {
-      await db.prepare(`
+      stmts.push(db.prepare(`
         UPDATE tracked_tokens
         SET symbol = ?, name = ?, last_seen = ?, image_url = ?
         WHERE address = ?
@@ -793,7 +815,7 @@ async function persistScan(db, tokens) {
         now,
         x.imageUrl || old.image_url || null,
         x.address
-      ).run();
+      ));
     } else if (old && validPrice) {
       const initialPrice = num(old.initial_price);
       const currentPrice = num(x.priceUsd);
@@ -831,7 +853,7 @@ async function persistScan(db, tokens) {
 
       const result = trackingResult(hit10At, hit25At, stop20At);
 
-      await db.prepare(`
+      stmts.push(db.prepare(`
         UPDATE tracked_tokens
         SET
           symbol = ?,
@@ -873,11 +895,11 @@ async function persistScan(db, tokens) {
         x.communityTakeover ? 1 : 0,
         x.imageUrl || old.image_url || null,
         x.address
-      ).run();
+      ));
     }
 
-    if ((old || shouldTrack(x) || num(x.adjustedScore) >= 45) && validPrice) {
-      await db.prepare(`
+    if ((old || pendingSet.has(x.address) || shouldTrack(x) || num(x.adjustedScore) >= 45) && validPrice) {
+      stmts.push(db.prepare(`
         INSERT INTO observations (
           address, seen_at, price, mcap, opportunity, risk, alert,
           liquidity, volume5m, volume1h, buys, sells, tx5m, change5m, change1h,
@@ -896,11 +918,12 @@ async function persistScan(db, tokens) {
         num(x.buys), num(x.sells), num(x.tx5m), num(x.change5m), num(x.change1h),
         num(x.acceleration), num(x.adjustedScore), JSON.stringify(x.discoverySources || []),
         num(x.boostTotal), x.communityTakeover ? 1 : 0
-      ).run();
+      ));
     }
   }
 
-  await saveForecastSamples(db, tokens, now);
+  for (let i = 0; i < stmts.length; i += 80) await db.batch(stmts.slice(i, i + 80));
+  await saveForecastSamples(db, tokens, now, [...pendingSet]);
 
   return now;
 }
@@ -1165,11 +1188,45 @@ async function analytics(db) {
    EXECUTE SCAN
 ========================================================= */
 
+function isStrongBase(x) {
+  return x.alert && num(x.risk) <= 40 && num(x.liquidity) >= 25000 && num(x.adjustedScore) >= 60;
+}
+function isStrong(x) {
+  return isStrongBase(x) && x.security?.checked === true && x.security.danger === false;
+}
+
+function forecastPasses(x) {
+  return Object.values(x.forecasts || {}).some(f => f?.ready && f.validated &&
+    num(f.probabilityUp) >= 65 && num(f.expectedReturnPct) > 0 && num(x.risk) <= 55 &&
+    num(x.liquidity) >= 10000 && num(x.adjustedScore) >= 55 && f.applicable !== false);
+}
+
+// Um sinal so e valido se a verificacao on-chain (RugCheck) correu e nao encontrou perigo grave.
+function isAiSignal(x) {
+  return forecastPasses(x) && x.security?.checked === true && x.security.danger === false;
+}
+
+async function attachSecurityGate(tokens) {
+  const candidates = tokens.filter(x => forecastPasses(x) || isStrongBase(x)).slice(0, 8);
+  await Promise.allSettled(candidates.map(async x => {
+    try {
+      const r = await fetchSecurityReport(x.address);
+      const dangerRisks = r.risks.filter(item => item.level === "danger").map(item => item.name);
+      x.security = {
+        checked: true,
+        danger: r.mintAuthorityAlert || r.freezeAuthorityAlert || dangerRisks.length > 0,
+        mintAuthorityAlert: r.mintAuthorityAlert, freezeAuthorityAlert: r.freezeAuthorityAlert,
+        lpLockedPct: r.lpLockedPct, dangerRisks: dangerRisks.slice(0, 5)
+      };
+    } catch (err) {
+      x.security = { checked: false, danger: null };
+    }
+  }));
+}
+
 function formatScanResult(result, at) {
   const tokens = result.tokens || [];
-  const aiAlerts = tokens.filter(x => Object.values(x.forecasts || {}).some(f => f?.ready && f.validated &&
-    num(f.probabilityUp) >= 65 && num(f.expectedReturnPct) > 0 && num(x.risk) <= 55 &&
-    num(x.liquidity) >= 10000 && num(x.adjustedScore) >= 55 && f.applicable !== false)).length;
+  const aiAlerts = tokens.filter(isAiSignal).length;
   const sourceCounts = {};
   for (const token of tokens) {
     for (const source of (token.discoverySources || [])) {
@@ -1190,12 +1247,65 @@ function formatScanResult(result, at) {
   };
 }
 
+async function setMeta(db, obj) {
+  await ensureSchema(db);
+  await db.batch(Object.entries(obj).map(([k, v]) =>
+    db.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)").bind(k, String(v))));
+}
+
+async function sendTelegram(env, text) {
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return { ok: false, reason: "Telegram não configurado" };
+  try {
+    const r = await fetch("https://api.telegram.org/bot" + env.TELEGRAM_BOT_TOKEN + "/sendMessage", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: env.TELEGRAM_CHAT_ID, text, parse_mode: "HTML", disable_web_page_preview: true })
+    });
+    return r.ok ? { ok: true } : { ok: false, reason: "Telegram HTTP " + r.status };
+  } catch (err) { return { ok: false, reason: err?.message || "erro de rede" }; }
+}
+
+async function notifyStrongTokens(env, tokens) {
+  await ensureSchema(env.DB);
+  const cooldown = Date.now() - 12 * 3600000;
+  let sent = 0;
+  for (const x of tokens.filter(t => isAiSignal(t) || isStrong(t)).slice(0, 5)) {
+    const seen = await env.DB.prepare("SELECT 1 AS n FROM alert_log WHERE address = ? AND sent_at > ? LIMIT 1").bind(x.address, cooldown).first();
+    if (seen) continue;
+    const ai = isAiSignal(x);
+    const best = Object.values(x.forecasts || {}).filter(f => f?.ready && f.validated).sort((p, q) => q.probabilityUp - p.probabilityUp)[0];
+    const text = (ai ? "🚨 <b>Sinal IA validado</b>" : "🔔 <b>Candidato forte</b> (scanner, sem validação IA)") +
+      "\n<b>$" + esc(x.symbol) + "</b> · " + esc(x.name) +
+      "\nPreço $" + x.priceUsd + " · MC " + money(x.marketCap) + " · Liq " + money(x.liquidity) +
+      "\nScore " + x.adjustedScore + " · Risco " + x.risk + "/100" +
+      (best ? " · Prob. subida " + best.probabilityUp + "% (" + best.horizon + ")" : "") +
+      "\nRugCheck: sem perigo grave detetado\n" + esc(x.url) +
+      "\n⚠️ Estimativa estatística, não é aconselhamento financeiro.";
+    const r = await sendTelegram(env, text);
+    if (r.ok) {
+      await env.DB.prepare("INSERT INTO alert_log (address, sent_at, tier) VALUES (?, ?, ?)").bind(x.address, Date.now(), ai ? "ai" : "strong").run();
+      sent++;
+    } else if (r.reason !== "Telegram não configurado") console.error("telegram", r.reason);
+  }
+  return sent;
+}
+
 async function executeScan(env) {
-  const result = await scan(env);
-  const tokens = result.tokens || [];
-  const at = Date.now();
-  await enqueuePersist(env.DB, tokens);
-  return formatScanResult(result, at);
+  try {
+    const result = await scan(env);
+    const tokens = result.tokens || [];
+    const at = Date.now();
+    await enqueuePersist(env.DB, tokens);
+    await attachForecasts(env.DB, tokens);
+    await attachSecurityGate(tokens);
+    let notified = 0;
+    try { notified = await notifyStrongTokens(env, tokens); } catch (err) { console.error("notify error", err); }
+    await setMeta(env.DB, { last_cron_at: at, last_cron_tokens: tokens.length, last_cron_notified: notified, last_cron_error: "" });
+    return formatScanResult(result, at);
+  } catch (err) {
+    console.error("scheduled scan failed", err);
+    try { await setMeta(env.DB, { last_cron_error: String(err?.message || err).slice(0, 200), last_cron_failed_at: Date.now() }); } catch {}
+    throw err;
+  }
 }
 
 /* =========================================================
@@ -1233,6 +1343,7 @@ async function handleRequest(request, env, ctx) {
       );
       await attachInitialMarketCaps(env.DB, result.tokens || []);
       await attachForecasts(env.DB, result.tokens || []);
+      await attachSecurityGate(result.tokens || []);
       return json(formatScanResult(result, Date.now()));
     } catch (err) {
       console.error("scan error", err);
@@ -1273,6 +1384,21 @@ async function handleRequest(request, env, ctx) {
         error: err?.message || "analytics failed"
       }, 500);
     }
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/health") {
+    try {
+      await ensureSchema(env.DB);
+      const rows = (await env.DB.prepare("SELECT key, value FROM kv").all()).results || [];
+      const m = Object.fromEntries(rows.map(r => [r.key, r.value]));
+      return json({ lastCronAt: num(m.last_cron_at) || null, lastCronTokens: num(m.last_cron_tokens), lastCronError: m.last_cron_error || "",
+        telegramConfigured: Boolean(env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) });
+    } catch (err) { return json({ error: err?.message || "health failed" }, 500); }
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/notify-test") {
+    const r = await sendTelegram(env, "✅ Meme AI: notificações Telegram a funcionar.");
+    return json(r, r.ok ? 200 : 400);
   }
 
   return json({ error: "Not found" }, 404);

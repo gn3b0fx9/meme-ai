@@ -9,3 +9,5 @@ crons = ["*/5 * * * *"]
 binding = "DB"
 database_name = "memeai-db"
 database_id = "be62ae92-1896-4716-ae97-a0d1ffd2ad03"
+
+# Secrets (not stored here): TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID  ->  wrangler secret put <NAME>
